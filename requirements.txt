@@ -1,0 +1,8 @@
+torch
+torchaudio
+torchcodec
+huggingface_hub
+transformers
+soundfile
+safetensors
+sentencepiece
