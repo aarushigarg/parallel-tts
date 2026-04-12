@@ -21,12 +21,19 @@ pip install ./dacvae
 ### 4. Download the dataset
 We use the Japanese Single Speaker Speech Dataset:
 https://www.kaggle.com/datasets/bryanpark/japanese-single-speaker-speech-dataset
+# Manual Download
 1. Go to the link above
 2. Click **Download**
 3. Move the `.zip` file into this project folder
 4. Unzip it:
 ```bash
 unzip japanese-single-speaker-speech-dataset.zip -d data/
+```
+# With Kaggle
+```bash
+kaggle datasets download -d bryanpark/japanese-single-speaker-speech-dataset
+unzip -j japanese-single-speaker-speech-dataset.zip "*/transcript.txt"
+rm japanese-single-speaker-speech-dataset.zip
 ```
 ## Run
 ```bash
