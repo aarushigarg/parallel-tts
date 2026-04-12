@@ -27,7 +27,7 @@ https://www.kaggle.com/datasets/bryanpark/japanese-single-speaker-speech-dataset
 3. Move the `.zip` file into this project folder
 4. Unzip it:
 ```bash
-unzip japanese-single-speaker-speech-dataset.zip -d data/
+unzip -j japanese-single-speaker-speech-dataset.zip "*/transcript.txt"
 ```
 #### With Kaggle
 ```bash
