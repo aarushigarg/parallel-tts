@@ -30,7 +30,7 @@ unzip japanese-single-speaker-speech-dataset.zip -d data/
 ```
 ## Run
 ```bash
-python serial.py
+python main.py
 ```
 ## How It Works
 
@@ -42,3 +42,6 @@ The `main.py` script runs the TTS model on each sampled phrase and measures the 
 
 ### serial.py
 The `serial.py` script implements the baseline serial pipeline. It takes a single input text, runs the TTS model end-to-end using the Irodori-TTS inference script, and measures the total synthesis time. This serves as the reference point for evaluating performance improvements in later parallel implementations.
+
+## Warning
+The model takes a while so grab a coffee or watch some TV while it runs....
