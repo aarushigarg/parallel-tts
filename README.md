@@ -4,21 +4,11 @@
 * Ensure you have Python 3.11
 * Run `bash setup_env.sh` to setup venv and install requirements
 
-### 1. Create Virtual Environment
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-```
-### 2. Clone Required Repositories
-```bash
-git clone https://github.com/Aratako/Irodori-TTS.git iro_tts
-git clone --depth 1 https://github.com/facebookresearch/dacvae.git
-```
-### 3. Install DACVAE
-```bash
-pip install ./dacvae
-```
-### 4. Download the dataset
+* Run `source .venv/bin/activate` to access the venv in terminal
+  * Add it to a script to avoid having to access it manually
+  * Run `deactivate` to exit venv
+  
+### Download the dataset
 We use the Japanese Single Speaker Speech Dataset:
 https://www.kaggle.com/datasets/bryanpark/japanese-single-speaker-speech-dataset
 #### Manual Download
