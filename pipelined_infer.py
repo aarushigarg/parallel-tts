@@ -163,7 +163,27 @@ def _resolve_checkpoint_path(args: argparse.Namespace) -> str:
     return str(checkpoint_path)
 
 
-def main() -> None:
+def _load_runtime_api():
+    from irodori_tts.inference_runtime import (
+        InferenceRuntime,
+        RuntimeKey,
+        SamplingRequest,
+        default_runtime_device,
+        resolve_cfg_scales,
+        save_wav,
+    )
+
+    return (
+        InferenceRuntime,
+        RuntimeKey,
+        SamplingRequest,
+        default_runtime_device,
+        resolve_cfg_scales,
+        save_wav,
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inference for Irodori-TTS.")
     checkpoint_group = parser.add_mutually_exclusive_group(required=False)
     checkpoint_group.add_argument(
@@ -465,7 +485,10 @@ def main() -> None:
         action="store_true",
         help="Run without speaker reference conditioning. Use this for voice-design checkpoints.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def _prepare_segments(args: argparse.Namespace) -> list[str]:
     text_input = _load_text_for_segmentation(args)
 
     if bool(args.segment_text):
@@ -478,37 +501,44 @@ def main() -> None:
         segments = [text_input]
     if not segments:
         raise ValueError("No non-empty text segments to synthesize.")
+    return segments
 
-    if not bool(args.dry_run_segments):
-        if args.checkpoint is None and args.hf_checkpoint is None:
-            parser.error(
-                "one of --checkpoint or --hf-checkpoint is required unless "
-                "--dry-run-segments is set."
-            )
-        if int(args.num_candidates) != 1:
-            raise ValueError("Pipelined inference currently supports --num-candidates 1.")
 
+def parse_pipeline_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser().parse_args(argv)
+
+
+def prepare_segments(args: argparse.Namespace) -> list[str]:
+    return _prepare_segments(args)
+
+
+def _print_segments(segments: list[str]) -> None:
     print(f"[pipeline] segment_count: {len(segments)}")
     for index, segment in enumerate(segments, start=1):
         print(f"[pipeline] segment[{index:03d}] chars={len(segment)} text={segment}")
 
-    if bool(args.dry_run_segments):
-        return
 
-    from irodori_tts.inference_runtime import (
-        InferenceRuntime,
-        RuntimeKey,
-        SamplingRequest,
-        default_runtime_device,
-        resolve_cfg_scales,
-        save_wav,
+def _validate_runtime_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.checkpoint is None and args.hf_checkpoint is None:
+        parser.error(
+            "one of --checkpoint or --hf-checkpoint is required unless "
+            "--dry-run-segments is set."
+        )
+    if int(args.num_candidates) != 1:
+        raise ValueError("Pipelined inference currently supports --num-candidates 1.")
+
+
+def create_pipeline_runtime(args: argparse.Namespace):
+    InferenceRuntime, RuntimeKey, _, default_runtime_device, _, _ = _load_runtime_api()
+    checkpoint_path = _resolve_checkpoint_path(args)
+    model_device = (
+        default_runtime_device() if str(args.model_device) == "auto" else str(args.model_device)
+    )
+    codec_device = (
+        default_runtime_device() if str(args.codec_device) == "auto" else str(args.codec_device)
     )
 
-    checkpoint_path = _resolve_checkpoint_path(args)
-    model_device = default_runtime_device() if str(args.model_device) == "auto" else str(args.model_device)
-    codec_device = default_runtime_device() if str(args.codec_device) == "auto" else str(args.codec_device)
-
-    runtime = InferenceRuntime.from_key(
+    return InferenceRuntime.from_key(
         RuntimeKey(
             checkpoint=checkpoint_path,
             model_device=model_device,
@@ -523,10 +553,14 @@ def main() -> None:
             compile_dynamic=bool(args.compile_dynamic),
         )
     )
+
+
+def _resolve_request_cfg_scales(args: argparse.Namespace, runtime):
+    _, _, _, _, resolve_cfg_scales, _ = _load_runtime_api()
     if runtime.model_cfg.use_speaker_condition and not (
         args.no_ref or args.ref_wav is not None or args.ref_latent is not None
     ):
-        parser.error(
+        raise ValueError(
             "speaker-conditioned checkpoints require one of --ref-wav, --ref-latent, or --no-ref."
         )
     cfg_scale_text, cfg_scale_caption, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
@@ -544,7 +578,19 @@ def main() -> None:
     )
     for msg in scale_messages:
         print(msg)
+    return cfg_scale_text, cfg_scale_caption, cfg_scale_speaker
 
+
+def synthesize_segmented_text(
+    runtime,
+    segments: list[str],
+    args: argparse.Namespace,
+) -> float:
+    _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
+    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker = _resolve_request_cfg_scales(
+        args,
+        runtime,
+    )
     output_path = Path(str(args.output_wav))
     suffix = output_path.suffix if output_path.suffix else ".wav"
     segment_audios = []
@@ -644,6 +690,33 @@ def main() -> None:
         for index, timings, total_to_decode in segment_timings:
             print(f"[timing] ---- segment[{index:03d}] ----")
             _print_timings(timings, total_to_decode)
+    return total_pipeline_time
+
+
+def run_from_args(
+    args: argparse.Namespace,
+    *,
+    parser: argparse.ArgumentParser | None = None,
+) -> float | None:
+    if parser is None:
+        parser = _build_parser()
+
+    segments = prepare_segments(args)
+    if not bool(args.dry_run_segments):
+        _validate_runtime_args(parser, args)
+
+    _print_segments(segments)
+    if bool(args.dry_run_segments):
+        return
+
+    runtime = create_pipeline_runtime(args)
+    return synthesize_segmented_text(runtime, segments, args)
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    run_from_args(args, parser=parser)
 
 
 if __name__ == "__main__":

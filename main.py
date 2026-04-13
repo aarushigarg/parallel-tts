@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from pipeline import run_pipeline_tts
+from pipeline import PipelineTTSRunner
 from preprocess import get_length_buckets, save_buckets_to_csv
 from serial import run_serial_tts
 
@@ -23,7 +23,6 @@ def parse_args():
 def main():
     args = parse_args()
     method = str(args.method)
-    run_tts = run_serial_tts if method == "serial" else run_pipeline_tts
     csv_file = OUTPUT_DIR / f"{method}_results.csv"
 
     DATASET_ROOT = Path(".")
@@ -57,6 +56,11 @@ def main():
 
     results = []
     sample_index = 1
+    if method == "serial":
+        run_tts = run_serial_tts
+    else:
+        pipeline_runner = PipelineTTSRunner()
+        run_tts = pipeline_runner.run
 
     #run selected method
     for length_label, text_list in categorized_texts:
