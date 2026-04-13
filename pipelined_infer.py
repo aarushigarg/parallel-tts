@@ -164,7 +164,7 @@ def _resolve_checkpoint_path(args: argparse.Namespace) -> str:
 
 
 def _load_runtime_api():
-    from irodori_tts.inference_runtime import (
+    from pipelined_runtime import (
         InferenceRuntime,
         RuntimeKey,
         SamplingRequest,
