@@ -3,6 +3,11 @@
 ## Setup 
 * Ensure you have Python 3.11
 * Run `bash setup_env.sh` to setup venv and install requirements
+* macOS note: if you hit an `llvmlite` build error, install LLVM 20:
+  * `brew install llvm@20`
+  * Then rerun `bash setup_env.sh` (the script will pick up `llvm-config` automatically if installed)
+  * If you have an issue with the python version, create a `.env.local` file with the custom path.
+  * Ex: `PYTHON_BIN=python3.11`
 
 * Run `source .venv/bin/activate` to access the venv in terminal
   * Add it to a script to avoid having to access it manually

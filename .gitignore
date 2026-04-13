@@ -1,1 +1,5 @@
 /.venv
+/japanese-single-speaker-speech-dataset
+.env.local
+/dacvae
+/iro_tts
