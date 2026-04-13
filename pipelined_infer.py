@@ -4,23 +4,14 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
 IRO_TTS_DIR = Path(__file__).resolve().parent / "iro_tts"
 sys.path.insert(0, str(IRO_TTS_DIR))
 
-from huggingface_hub import hf_hub_download
-
-from irodori_tts.inference_runtime import (
-    InferenceRuntime,
-    RuntimeKey,
-    SamplingRequest,
-    default_runtime_device,
-    resolve_cfg_scales,
-    save_wav,
-)
-
 FIXED_SECONDS = 30.0
+SEGMENT_BOUNDARY_PUNCTUATION = set("。！？!?、，,；;：:」』）)]】〉》\n")
 
 
 def _parse_optional_float(value: str) -> float | None:
@@ -45,7 +36,111 @@ def _print_timings(timings: list[tuple[str, float]], total_to_decode: float) -> 
     print(f"[timing] total_to_decode: {total_to_decode:.3f} s")
 
 
+def _split_text_segments(text: str, *, min_chars: int, max_chars: int) -> list[str]:
+    cleaned = str(text).strip()
+    if cleaned == "":
+        return []
+
+    raw_segments: list[str] = []
+    current: list[str] = []
+    for ch in cleaned:
+        current.append(ch)
+        if ch in SEGMENT_BOUNDARY_PUNCTUATION:
+            segment = "".join(current).strip()
+            if segment:
+                raw_segments.append(segment)
+            current = []
+    tail = "".join(current).strip()
+    if tail:
+        raw_segments.append(tail)
+
+    if not raw_segments:
+        raw_segments = [cleaned]
+
+    sized_segments: list[str] = []
+    for segment in raw_segments:
+        if max_chars <= 0 or len(segment) <= max_chars:
+            sized_segments.append(segment)
+            continue
+        for start in range(0, len(segment), max_chars):
+            piece = segment[start : start + max_chars].strip()
+            if piece:
+                sized_segments.append(piece)
+
+    merged_segments: list[str] = []
+    pending = ""
+    for segment in sized_segments:
+        pending = f"{pending}{segment}" if pending else segment
+        if len(pending) >= min_chars:
+            merged_segments.append(pending)
+            pending = ""
+    if pending:
+        if merged_segments:
+            merged_segments[-1] = f"{merged_segments[-1]}{pending}"
+        else:
+            merged_segments.append(pending)
+
+    return merged_segments
+
+
+def _load_text_for_segmentation(args: argparse.Namespace) -> str:
+    if args.text is not None and str(args.text).strip() != "":
+        return str(args.text)
+    if args.text_file is None:
+        raise ValueError("Either --text or --text-file is required.")
+
+    path = Path(str(args.text_file)).expanduser()
+    max_lines = None if args.text_file_lines is None else int(args.text_file_lines)
+    texts: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split("|")
+            if len(parts) == 4:
+                text = parts[1].strip()
+            else:
+                text = stripped
+            if text:
+                texts.append(text)
+            if max_lines is not None and len(texts) >= max_lines:
+                break
+
+    if not texts:
+        raise ValueError(f"No text found in {path}.")
+    return "".join(texts)
+
+
+def _concat_audio_segments(
+    audios,
+    *,
+    sample_rate: int,
+    silence_ms: float,
+):
+    import torch
+
+    if not audios:
+        raise ValueError("Expected at least one audio segment to concatenate.")
+    if len(audios) == 1:
+        return audios[0]
+
+    silence_samples = max(0, int(float(sample_rate) * float(silence_ms) / 1000.0))
+    if silence_samples == 0:
+        return torch.cat(audios, dim=-1)
+
+    parts: list[torch.Tensor] = []
+    for audio in audios:
+        if parts:
+            silence = audio.new_zeros((audio.shape[0], silence_samples))
+            parts.append(silence)
+        parts.append(audio)
+    return torch.cat(parts, dim=-1)
+
+
 def _resolve_checkpoint_path(args: argparse.Namespace) -> str:
+    from huggingface_hub import hf_hub_download
+
     if args.checkpoint is not None:
         checkpoint_path = Path(str(args.checkpoint)).expanduser()
         if not checkpoint_path.is_file():
@@ -70,7 +165,7 @@ def _resolve_checkpoint_path(args: argparse.Namespace) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inference for Irodori-TTS.")
-    checkpoint_group = parser.add_mutually_exclusive_group(required=True)
+    checkpoint_group = parser.add_mutually_exclusive_group(required=False)
     checkpoint_group.add_argument(
         "--checkpoint",
         default=None,
@@ -84,7 +179,18 @@ def main() -> None:
             "(e.g. your-org/your-model)."
         ),
     )
-    parser.add_argument("--text", required=True)
+    parser.add_argument("--text", default=None)
+    parser.add_argument(
+        "--text-file",
+        default=None,
+        help="Optional text file. For transcript rows with pipes, the second field is used.",
+    )
+    parser.add_argument(
+        "--text-file-lines",
+        type=int,
+        default=None,
+        help="Read only the first N non-empty text rows from --text-file.",
+    )
     parser.add_argument(
         "--caption",
         default=None,
@@ -92,8 +198,43 @@ def main() -> None:
     )
     parser.add_argument("--output-wav", default="output.wav")
     parser.add_argument(
+        "--segment-text",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Split input text into punctuation-delimited segments before synthesis.",
+    )
+    parser.add_argument(
+        "--segment-min-chars",
+        type=int,
+        default=12,
+        help="Merge adjacent punctuation-delimited segments until they reach this length.",
+    )
+    parser.add_argument(
+        "--segment-max-chars",
+        type=int,
+        default=180,
+        help="Hard-split any segment longer than this many characters. Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--segment-silence-ms",
+        type=float,
+        default=80.0,
+        help="Silence inserted between synthesized segments in the final wav.",
+    )
+    parser.add_argument(
+        "--save-segments",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also save each synthesized segment next to the final output wav.",
+    )
+    parser.add_argument(
+        "--dry-run-segments",
+        action="store_true",
+        help="Only print text segments and exit without loading the model.",
+    )
+    parser.add_argument(
         "--model-device",
-        default=default_runtime_device(),
+        default="auto",
         help="Model inference device (e.g. cuda, mps, cpu).",
     )
     parser.add_argument(
@@ -104,7 +245,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--codec-device",
-        default=default_runtime_device(),
+        default="auto",
         help="Codec device for reference encode/decode (e.g. cuda, mps, cpu).",
     )
     parser.add_argument(
@@ -325,16 +466,55 @@ def main() -> None:
         help="Run without speaker reference conditioning. Use this for voice-design checkpoints.",
     )
     args = parser.parse_args()
+    text_input = _load_text_for_segmentation(args)
+
+    if bool(args.segment_text):
+        segments = _split_text_segments(
+            text_input,
+            min_chars=max(1, int(args.segment_min_chars)),
+            max_chars=int(args.segment_max_chars),
+        )
+    else:
+        segments = [text_input]
+    if not segments:
+        raise ValueError("No non-empty text segments to synthesize.")
+
+    if not bool(args.dry_run_segments):
+        if args.checkpoint is None and args.hf_checkpoint is None:
+            parser.error(
+                "one of --checkpoint or --hf-checkpoint is required unless "
+                "--dry-run-segments is set."
+            )
+        if int(args.num_candidates) != 1:
+            raise ValueError("Pipelined inference currently supports --num-candidates 1.")
+
+    print(f"[pipeline] segment_count: {len(segments)}")
+    for index, segment in enumerate(segments, start=1):
+        print(f"[pipeline] segment[{index:03d}] chars={len(segment)} text={segment}")
+
+    if bool(args.dry_run_segments):
+        return
+
+    from irodori_tts.inference_runtime import (
+        InferenceRuntime,
+        RuntimeKey,
+        SamplingRequest,
+        default_runtime_device,
+        resolve_cfg_scales,
+        save_wav,
+    )
 
     checkpoint_path = _resolve_checkpoint_path(args)
+    model_device = default_runtime_device() if str(args.model_device) == "auto" else str(args.model_device)
+    codec_device = default_runtime_device() if str(args.codec_device) == "auto" else str(args.codec_device)
 
     runtime = InferenceRuntime.from_key(
         RuntimeKey(
             checkpoint=checkpoint_path,
-            model_device=str(args.model_device),
+            model_device=model_device,
             codec_repo=str(args.codec_repo),
             model_precision=str(args.model_precision),
-            codec_device=str(args.codec_device),
+            codec_device=codec_device,
             codec_precision=str(args.codec_precision),
             codec_deterministic_encode=bool(args.codec_deterministic_encode),
             codec_deterministic_decode=bool(args.codec_deterministic_decode),
@@ -365,68 +545,105 @@ def main() -> None:
     for msg in scale_messages:
         print(msg)
 
-    result = runtime.synthesize(
-        SamplingRequest(
-            text=str(args.text),
-            caption=None if args.caption is None else str(args.caption),
-            ref_wav=args.ref_wav,
-            ref_latent=args.ref_latent,
-            no_ref=bool(args.no_ref),
-            ref_normalize_db=args.ref_normalize_db,
-            ref_ensure_max=bool(args.ref_ensure_max),
-            num_candidates=int(args.num_candidates),
-            decode_mode=str(args.decode_mode),
-            seconds=FIXED_SECONDS,
-            max_ref_seconds=float(args.max_ref_seconds)
-            if args.max_ref_seconds is not None
-            else None,
-            max_text_len=None if args.max_text_len is None else int(args.max_text_len),
-            max_caption_len=None if args.max_caption_len is None else int(args.max_caption_len),
-            num_steps=int(args.num_steps),
-            cfg_scale_text=cfg_scale_text,
-            cfg_scale_caption=cfg_scale_caption,
-            cfg_scale_speaker=cfg_scale_speaker,
-            cfg_guidance_mode=str(args.cfg_guidance_mode),
-            cfg_scale=None,
-            cfg_min_t=float(args.cfg_min_t),
-            cfg_max_t=float(args.cfg_max_t),
-            truncation_factor=None
-            if args.truncation_factor is None
-            else float(args.truncation_factor),
-            rescale_k=None if args.rescale_k is None else float(args.rescale_k),
-            rescale_sigma=None if args.rescale_sigma is None else float(args.rescale_sigma),
-            context_kv_cache=bool(args.context_kv_cache),
-            speaker_kv_scale=None
-            if args.speaker_kv_scale is None
-            else float(args.speaker_kv_scale),
-            speaker_kv_min_t=None
-            if args.speaker_kv_scale is None
-            else float(args.speaker_kv_min_t),
-            speaker_kv_max_layers=None
-            if args.speaker_kv_max_layers is None
-            else int(args.speaker_kv_max_layers),
-            seed=None if args.seed is None else int(args.seed),
-            trim_tail=bool(args.trim_tail),
-            tail_window_size=int(args.tail_window_size),
-            tail_std_threshold=float(args.tail_std_threshold),
-            tail_mean_threshold=float(args.tail_mean_threshold),
-        ),
-        log_fn=None,
-    )
+    output_path = Path(str(args.output_wav))
+    suffix = output_path.suffix if output_path.suffix else ".wav"
+    segment_audios = []
+    segment_timings: list[tuple[int, list[tuple[str, float]], float]] = []
+    used_seeds: list[int] = []
+    sample_rate: int | None = None
+    time_to_first_audio: float | None = None
+    pipeline_t0 = time.perf_counter()
 
-    print(f"[seed] used_seed: {result.used_seed}")
-    if int(args.num_candidates) == 1:
-        out_path = save_wav(args.output_wav, result.audio, result.sample_rate)
-        print(f"Saved: {out_path}")
-    else:
-        base_path = Path(str(args.output_wav))
-        suffix = base_path.suffix if base_path.suffix else ".wav"
-        for i, audio in enumerate(result.audios, start=1):
-            out_path = base_path.with_name(f"{base_path.stem}_{i:03d}{suffix}")
-            saved = save_wav(out_path, audio, result.sample_rate)
-            print(f"Saved[{i}]: {saved}")
+    for index, segment in enumerate(segments, start=1):
+        segment_seed = None if args.seed is None else int(args.seed) + index - 1
+        result = runtime.synthesize(
+            SamplingRequest(
+                text=segment,
+                caption=None if args.caption is None else str(args.caption),
+                ref_wav=args.ref_wav,
+                ref_latent=args.ref_latent,
+                no_ref=bool(args.no_ref),
+                ref_normalize_db=args.ref_normalize_db,
+                ref_ensure_max=bool(args.ref_ensure_max),
+                num_candidates=int(args.num_candidates),
+                decode_mode=str(args.decode_mode),
+                seconds=FIXED_SECONDS,
+                max_ref_seconds=float(args.max_ref_seconds)
+                if args.max_ref_seconds is not None
+                else None,
+                max_text_len=None if args.max_text_len is None else int(args.max_text_len),
+                max_caption_len=None
+                if args.max_caption_len is None
+                else int(args.max_caption_len),
+                num_steps=int(args.num_steps),
+                cfg_scale_text=cfg_scale_text,
+                cfg_scale_caption=cfg_scale_caption,
+                cfg_scale_speaker=cfg_scale_speaker,
+                cfg_guidance_mode=str(args.cfg_guidance_mode),
+                cfg_scale=None,
+                cfg_min_t=float(args.cfg_min_t),
+                cfg_max_t=float(args.cfg_max_t),
+                truncation_factor=None
+                if args.truncation_factor is None
+                else float(args.truncation_factor),
+                rescale_k=None if args.rescale_k is None else float(args.rescale_k),
+                rescale_sigma=None if args.rescale_sigma is None else float(args.rescale_sigma),
+                context_kv_cache=bool(args.context_kv_cache),
+                speaker_kv_scale=None
+                if args.speaker_kv_scale is None
+                else float(args.speaker_kv_scale),
+                speaker_kv_min_t=None
+                if args.speaker_kv_scale is None
+                else float(args.speaker_kv_min_t),
+                speaker_kv_max_layers=None
+                if args.speaker_kv_max_layers is None
+                else int(args.speaker_kv_max_layers),
+                seed=segment_seed,
+                trim_tail=bool(args.trim_tail),
+                tail_window_size=int(args.tail_window_size),
+                tail_std_threshold=float(args.tail_std_threshold),
+                tail_mean_threshold=float(args.tail_mean_threshold),
+            ),
+            log_fn=None,
+        )
+        if sample_rate is None:
+            sample_rate = int(result.sample_rate)
+        elif int(result.sample_rate) != sample_rate:
+            raise ValueError(
+                f"Segment {index} sample_rate={result.sample_rate} did not match {sample_rate}."
+            )
+
+        segment_audios.append(result.audio)
+        segment_timings.append((index, result.stage_timings, result.total_to_decode))
+        used_seeds.append(int(result.used_seed))
+        if time_to_first_audio is None:
+            time_to_first_audio = time.perf_counter() - pipeline_t0
+
+        print(f"[seed] segment[{index:03d}] used_seed: {result.used_seed}")
+        if bool(args.save_segments):
+            segment_path = output_path.with_name(
+                f"{output_path.stem}_segment_{index:03d}{suffix}"
+            )
+            saved = save_wav(segment_path, result.audio, result.sample_rate)
+            print(f"Saved segment[{index:03d}]: {saved}")
+
+    assert sample_rate is not None
+    final_audio = _concat_audio_segments(
+        segment_audios,
+        sample_rate=sample_rate,
+        silence_ms=float(args.segment_silence_ms),
+    )
+    out_path = save_wav(args.output_wav, final_audio, sample_rate)
+    print(f"Saved: {out_path}")
+
+    total_pipeline_time = time.perf_counter() - pipeline_t0
+    print(f"[pipeline] time_to_first_audio: {time_to_first_audio:.3f} s")
+    print(f"[pipeline] total_segmented_synthesis: {total_pipeline_time:.3f} s")
+    print(f"[pipeline] used_seeds: {used_seeds}")
     if args.show_timings:
-        _print_timings(result.stage_timings, result.total_to_decode)
+        for index, timings, total_to_decode in segment_timings:
+            print(f"[timing] ---- segment[{index:03d}] ----")
+            _print_timings(timings, total_to_decode)
 
 
 if __name__ == "__main__":
