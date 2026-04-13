@@ -4,3 +4,5 @@
 transcript.txt
 outputs
 __pycache__
+/dacvae
+/iro_tts
