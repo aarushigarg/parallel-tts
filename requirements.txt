@@ -6,3 +6,4 @@ transformers
 soundfile
 safetensors
 sentencepiece
+kaggle

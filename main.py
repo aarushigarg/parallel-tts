@@ -1,15 +1,31 @@
+import argparse
 import csv
-from pathlib import Path
+import shutil
 from datetime import datetime
+from pathlib import Path
 
+from pipeline import run_pipeline_tts
 from preprocess import get_length_buckets, save_buckets_to_csv
 from serial import run_serial_tts
 
 OUTPUT_DIR = Path("outputs")
-CSV_FILE = OUTPUT_DIR / "serial_results.csv"
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run TTS timing experiments.")
+    parser.add_argument(
+        "method",
+        choices=["serial", "pipeline"],
+        help="Inference runner to use.",
+    )
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
+    method = str(args.method)
+    run_tts = run_serial_tts if method == "serial" else run_pipeline_tts
+    csv_file = OUTPUT_DIR / f"{method}_results.csv"
+
     DATASET_ROOT = Path(".")
     N = 1                   
 
@@ -33,8 +49,6 @@ def main():
         ("long", long_list),
     ]
 
-    short_list, medium_list, long_list = get_length_buckets(DATASET_ROOT, N)
-
     #saves inputs to csv for easy viewing
     BUCKET_CSV = OUTPUT_DIR / "buckets.csv"
     save_buckets_to_csv(short_list, medium_list, long_list, BUCKET_CSV)
@@ -44,21 +58,21 @@ def main():
     results = []
     sample_index = 1
 
-    #run serial
+    #run selected method
     for length_label, text_list in categorized_texts:
         for text in text_list:
             output_wav = OUTPUT_DIR / f"{length_label}_{sample_index}.wav"
             num_characters = len(text)
 
             try:
-                runtime = run_serial_tts(text, output_wav)
+                runtime = run_tts(text, output_wav)
 
                 print(f"[{sample_index}] ({length_label}) Saved: {output_wav}")
                 print(f"[{sample_index}] Time: {runtime:.2f}s")
 
                 results.append([
                     sample_index,
-                    "serial",
+                    method,
                     program_start_str,
                     length_label,
                     num_characters,
@@ -72,7 +86,7 @@ def main():
 
                 results.append([
                     sample_index,
-                    "serial",
+                    method,
                     program_start_str,
                     length_label,
                     num_characters,
@@ -84,7 +98,7 @@ def main():
             sample_index += 1
 
     #write csv
-    with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+    with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "index",
@@ -98,7 +112,7 @@ def main():
         ])
         writer.writerows(results)
 
-    print(f"\nSaved CSV results to {CSV_FILE}")
+    print(f"\nSaved CSV results to {csv_file}")
 
 
 if __name__ == "__main__":
