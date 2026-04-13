@@ -35,7 +35,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     fi
 fi
 
-PY=${PYTHON_BIN:-python3.11}
+PY=${PYTHON_BIN:-/apps/spack/2406/apps/linux-rocky8-x86_64_v3/gcc-13.3.0/python-3.11.9-x74mtjf/bin/python3}
 
 if ! command -v "$PY" >/dev/null 2>&1; then
     echo "Python interpreter not found: $PY" >&2
