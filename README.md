@@ -66,6 +66,24 @@ If `transcript.txt` is somewhere else:
 python main.py serial --dataset-root path/to/dataset-folder
 ```
 
+To run the pipeline implementation directly on a few transcript rows:
+
+```bash
+python pipelined_infer.py \
+  --hf-checkpoint Aratako/Irodori-TTS-500M-v2 \
+  --text-file transcript.txt \
+  --text-file-lines 2 \
+  --no-ref \
+  --pipeline-overlap \
+  --output-wav outputs/pipeline_overlap.wav
+```
+
+To check only the text splitting without loading the model:
+
+```bash
+python pipelined_infer.py --text-file transcript.txt --text-file-lines 2 --dry-run-segments
+```
+
 Outputs are written per method:
 
 ```text
@@ -105,11 +123,22 @@ The `serial.py` script implements the baseline serial pipeline. It takes a singl
 ### pipeline.py
 The `pipeline.py` script uses the refactored pipeline runtime. It loads `InferenceRuntime` once for the whole pipeline benchmark run and reuses it across inputs.
 
+The pipeline implementation splits each text input into punctuation-based segments, then runs the model in two overlapped stages:
+
+```text
+main thread:    segment 1 text -> latent      segment 2 text -> latent
+decode worker:                          segment 1 latent -> audio
+```
+
+The latent is the model's internal audio representation. It is not a playable WAV file yet. The decode worker converts that latent representation into waveform audio, and the final waveform is saved as a `.wav` file.
+
+This means `pipeline` is not running all chunks independently at the same time. That would be chunk parallelism. The pipeline version overlaps different stages of consecutive segments: while the decode worker turns one segment's latent into audio, the main thread can start generating the next segment's latent.
+
 ### text_segments.py
 The `text_segments.py` script contains shared punctuation-based Japanese text segmentation. Both pipeline and chunk-parallel implementations should use this file so the benchmark compares scheduling strategy rather than different text boundaries.
 
 ### pipelined_runtime.py
-The `pipelined_runtime.py` file is a local copy of the Irodori runtime with imports adjusted for this repo. Its inference flow has been split into callable stages such as input preparation, latent generation, latent unpatchifying, and waveform decoding. This is the base for implementing pipeline scheduling.
+The `pipelined_runtime.py` file is a local copy of the Irodori runtime with imports adjusted for this repo. Its inference flow has been split into callable stages such as input preparation, latent generation, latent unpatchifying, and waveform decoding. The pipeline code calls these stages directly instead of calling the original end-to-end `runtime.synthesize(...)` function for every segment.
 
 ## Warning
 The model takes a while so grab a coffee or watch some TV while it runs....
