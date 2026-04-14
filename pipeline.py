@@ -71,7 +71,7 @@ class RFSplitPipelineTTSRunner:
         stage0_args.codec_device = "cpu"
         stage1_args = copy(self.base_args)
         stage1_args.model_device = "cuda:1"
-        stage1_args.codec_device = "cuda:1"
+        stage1_args.codec_device = "cpu"
 
         print("[pipeline3] loading stage 0 InferenceRuntime on cuda:0")
         self.runtime_stage0 = create_pipeline_runtime(stage0_args)

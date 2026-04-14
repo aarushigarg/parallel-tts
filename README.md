@@ -92,7 +92,9 @@ Running pipelined version in Discovery CARC:
 ```bash
 salloc --partition=gpu --gres=gpu:1 --cpus-per-task=4 --mem=32GB --time=2:00:00
 nvidia-smi
-python -c "import torch; print('torch:', torch.__version__); print('torch cuda build:', torch.version.cuda); print('cuda available:', torch.cuda.is_available())"
+source .venv/bin/activate
+python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
+python main.py pipeline2
 ```
 Ensure that a GPU is allocated, and cuda is available. 
 
@@ -100,8 +102,9 @@ Ensure that a GPU is allocated, and cuda is available.
 ```bash
 salloc --partition=gpu --gres=gpu:2 --cpus-per-task=4 --mem=48GB --time=2:00:00
 nvidia-smi
+source .venv/bin/activate
 python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
-python main.py pipeline2 pipeline3 -n 1
+python main.py pipeline3
 ```
 
 To leave the salloc:
@@ -162,7 +165,7 @@ pipeline / pipeline2:
 
 pipeline3:
   two-GPU RF-split pipeline
-  runs the first half of sample_rf on cuda:0 and the second half on cuda:1
+  runs the first half of sample_rf on cuda:0, the second half on cuda:1, and decode on CPU
 ```
 
 `pipeline` is currently an alias for `pipeline2` so older commands still work.
@@ -182,10 +185,11 @@ The `pipeline3` implementation splits the expensive RF sampling stage itself:
 
 ```text
 GPU 0: segment 1 sample_rf steps 0-20      segment 2 sample_rf steps 0-20
-GPU 1:                                      segment 1 sample_rf steps 20-40 + decode
+GPU 1:                                      segment 1 sample_rf steps 20-40
+CPU:                                                        segment 1 decode
 ```
 
-This is more experimental and requires an allocation with at least two CUDA GPUs. It loads two full model runtimes, so it uses more GPU memory than `pipeline2`.
+This is more experimental and requires an allocation with at least two CUDA GPUs. It loads two full model runtimes, so it uses more GPU memory than `pipeline2`. The decode stage uses the CPU so it does not add more GPU work after the second RF stage.
 
 ### text_segments.py
 The `text_segments.py` script contains shared punctuation-based Japanese text segmentation. Both pipeline and chunk-parallel implementations should use this file so the benchmark compares scheduling strategy rather than different text boundaries.
