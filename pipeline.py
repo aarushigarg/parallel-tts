@@ -6,7 +6,7 @@ from pipelined_infer import (
     create_pipeline_runtime,
     parse_pipeline_args,
     prepare_segments,
-    synthesize_segmented_text,
+    synthesize_segmented_text_pipelined,
 )
 
 
@@ -41,7 +41,7 @@ class PipelineTTSRunner:
 
         segments = prepare_segments(args)
         start = time.time()
-        synthesize_segmented_text(self.runtime, segments, args)
+        synthesize_segmented_text_pipelined(self.runtime, segments, args)
         end = time.time()
         return end - start
 

@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import math
+from queue import Empty, Queue
 import sys
+from threading import Thread
 import time
+from typing import Any
 from pathlib import Path
 
 from text_segments import load_text_for_segmentation, split_text_segments
@@ -13,6 +17,29 @@ IRO_TTS_DIR = Path(__file__).resolve().parent / "iro_tts"
 sys.path.insert(0, str(IRO_TTS_DIR))
 
 FIXED_SECONDS = 30.0
+
+
+@dataclass
+class _DecodeJob:
+    index: int
+    request: Any
+    context: Any
+    prepared: Any
+    latent: Any
+    stage_timings: list[tuple[str, float]]
+    stage_start: float
+    used_seed: int
+
+
+@dataclass
+class _DecodeResult:
+    index: int
+    audio: Any
+    sample_rate: int
+    stage_timings: list[tuple[str, float]]
+    total_to_decode: float
+    used_seed: int
+    completed_at: float
 
 
 def _parse_optional_float(value: str) -> float | None:
@@ -171,6 +198,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Also save each synthesized segment next to the final output wav.",
+    )
+    parser.add_argument(
+        "--pipeline-overlap",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the decode-worker pipeline path instead of segmented serial synthesis.",
     )
     parser.add_argument(
         "--dry-run-segments",
@@ -510,6 +543,55 @@ def _resolve_request_cfg_scales(args: argparse.Namespace, runtime):
     return cfg_scale_text, cfg_scale_caption, cfg_scale_speaker
 
 
+def _build_sampling_request(
+    SamplingRequest,
+    *,
+    args: argparse.Namespace,
+    text: str,
+    seed: int | None,
+    cfg_scale_text: float,
+    cfg_scale_caption: float,
+    cfg_scale_speaker: float,
+):
+    return SamplingRequest(
+        text=text,
+        caption=None if args.caption is None else str(args.caption),
+        ref_wav=args.ref_wav,
+        ref_latent=args.ref_latent,
+        no_ref=bool(args.no_ref),
+        ref_normalize_db=args.ref_normalize_db,
+        ref_ensure_max=bool(args.ref_ensure_max),
+        num_candidates=int(args.num_candidates),
+        decode_mode=str(args.decode_mode),
+        seconds=FIXED_SECONDS,
+        max_ref_seconds=float(args.max_ref_seconds) if args.max_ref_seconds is not None else None,
+        max_text_len=None if args.max_text_len is None else int(args.max_text_len),
+        max_caption_len=None if args.max_caption_len is None else int(args.max_caption_len),
+        num_steps=int(args.num_steps),
+        cfg_scale_text=cfg_scale_text,
+        cfg_scale_caption=cfg_scale_caption,
+        cfg_scale_speaker=cfg_scale_speaker,
+        cfg_guidance_mode=str(args.cfg_guidance_mode),
+        cfg_scale=None,
+        cfg_min_t=float(args.cfg_min_t),
+        cfg_max_t=float(args.cfg_max_t),
+        truncation_factor=None if args.truncation_factor is None else float(args.truncation_factor),
+        rescale_k=None if args.rescale_k is None else float(args.rescale_k),
+        rescale_sigma=None if args.rescale_sigma is None else float(args.rescale_sigma),
+        context_kv_cache=bool(args.context_kv_cache),
+        speaker_kv_scale=None if args.speaker_kv_scale is None else float(args.speaker_kv_scale),
+        speaker_kv_min_t=None if args.speaker_kv_scale is None else float(args.speaker_kv_min_t),
+        speaker_kv_max_layers=None
+        if args.speaker_kv_max_layers is None
+        else int(args.speaker_kv_max_layers),
+        seed=seed,
+        trim_tail=bool(args.trim_tail),
+        tail_window_size=int(args.tail_window_size),
+        tail_std_threshold=float(args.tail_std_threshold),
+        tail_mean_threshold=float(args.tail_mean_threshold),
+    )
+
+
 def synthesize_segmented_text(
     runtime,
     segments: list[str],
@@ -532,52 +614,14 @@ def synthesize_segmented_text(
     for index, segment in enumerate(segments, start=1):
         segment_seed = None if args.seed is None else int(args.seed) + index - 1
         result = runtime.synthesize(
-            SamplingRequest(
+            _build_sampling_request(
+                SamplingRequest,
+                args=args,
                 text=segment,
-                caption=None if args.caption is None else str(args.caption),
-                ref_wav=args.ref_wav,
-                ref_latent=args.ref_latent,
-                no_ref=bool(args.no_ref),
-                ref_normalize_db=args.ref_normalize_db,
-                ref_ensure_max=bool(args.ref_ensure_max),
-                num_candidates=int(args.num_candidates),
-                decode_mode=str(args.decode_mode),
-                seconds=FIXED_SECONDS,
-                max_ref_seconds=float(args.max_ref_seconds)
-                if args.max_ref_seconds is not None
-                else None,
-                max_text_len=None if args.max_text_len is None else int(args.max_text_len),
-                max_caption_len=None
-                if args.max_caption_len is None
-                else int(args.max_caption_len),
-                num_steps=int(args.num_steps),
+                seed=segment_seed,
                 cfg_scale_text=cfg_scale_text,
                 cfg_scale_caption=cfg_scale_caption,
                 cfg_scale_speaker=cfg_scale_speaker,
-                cfg_guidance_mode=str(args.cfg_guidance_mode),
-                cfg_scale=None,
-                cfg_min_t=float(args.cfg_min_t),
-                cfg_max_t=float(args.cfg_max_t),
-                truncation_factor=None
-                if args.truncation_factor is None
-                else float(args.truncation_factor),
-                rescale_k=None if args.rescale_k is None else float(args.rescale_k),
-                rescale_sigma=None if args.rescale_sigma is None else float(args.rescale_sigma),
-                context_kv_cache=bool(args.context_kv_cache),
-                speaker_kv_scale=None
-                if args.speaker_kv_scale is None
-                else float(args.speaker_kv_scale),
-                speaker_kv_min_t=None
-                if args.speaker_kv_scale is None
-                else float(args.speaker_kv_min_t),
-                speaker_kv_max_layers=None
-                if args.speaker_kv_max_layers is None
-                else int(args.speaker_kv_max_layers),
-                seed=segment_seed,
-                trim_tail=bool(args.trim_tail),
-                tail_window_size=int(args.tail_window_size),
-                tail_std_threshold=float(args.tail_std_threshold),
-                tail_mean_threshold=float(args.tail_mean_threshold),
             ),
             log_fn=None,
         )
@@ -622,6 +666,184 @@ def synthesize_segmented_text(
     return total_pipeline_time
 
 
+def synthesize_segmented_text_pipelined(
+    runtime,
+    segments: list[str],
+    args: argparse.Namespace,
+) -> float:
+    import torch
+
+    _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
+    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker = _resolve_request_cfg_scales(
+        args,
+        runtime,
+    )
+    output_path = Path(str(args.output_wav))
+    suffix = output_path.suffix if output_path.suffix else ".wav"
+    decode_queue: Queue[_DecodeJob | None] = Queue()
+    result_queue: Queue[_DecodeResult | BaseException] = Queue()
+    results_by_index: dict[int, _DecodeResult] = {}
+    used_seeds: list[int] = []
+    sample_rate: int | None = None
+    time_to_first_audio: float | None = None
+    pipeline_t0 = time.perf_counter()
+
+    def _ignore_log(_msg: str) -> None:
+        return
+
+    def _decode_worker() -> None:
+        while True:
+            job = decode_queue.get()
+            try:
+                if job is None:
+                    return
+                try:
+                    with torch.inference_mode():
+                        audios = runtime.decode_audio(
+                            job.request,
+                            job.context,
+                            job.prepared,
+                            job.latent,
+                            stage_timings=job.stage_timings,
+                            log_fn=_ignore_log,
+                        )
+                    if not audios:
+                        raise RuntimeError(f"Segment {job.index} produced no decoded audio.")
+                    result_queue.put(
+                        _DecodeResult(
+                            index=job.index,
+                            audio=audios[0],
+                            sample_rate=int(runtime.codec.sample_rate),
+                            stage_timings=job.stage_timings,
+                            total_to_decode=time.perf_counter() - job.stage_start,
+                            used_seed=job.used_seed,
+                            completed_at=time.perf_counter(),
+                        )
+                    )
+                except BaseException as exc:
+                    result_queue.put(exc)
+                    return
+            finally:
+                decode_queue.task_done()
+
+    def _record_result(item: _DecodeResult | BaseException) -> None:
+        nonlocal sample_rate, time_to_first_audio
+        if isinstance(item, BaseException):
+            raise item
+        if sample_rate is None:
+            sample_rate = item.sample_rate
+        elif item.sample_rate != sample_rate:
+            raise ValueError(
+                f"Segment {item.index} sample_rate={item.sample_rate} did not match {sample_rate}."
+            )
+        results_by_index[item.index] = item
+        if time_to_first_audio is None:
+            time_to_first_audio = item.completed_at - pipeline_t0
+
+    def _drain_completed_results() -> None:
+        while True:
+            try:
+                item = result_queue.get_nowait()
+            except Empty:
+                return
+            _record_result(item)
+
+    worker = Thread(target=_decode_worker, name="tts-decode-worker", daemon=True)
+    worker.start()
+
+    for index, segment in enumerate(segments, start=1):
+        segment_seed = None if args.seed is None else int(args.seed) + index - 1
+        request = _build_sampling_request(
+            SamplingRequest,
+            args=args,
+            text=segment,
+            seed=segment_seed,
+            cfg_scale_text=cfg_scale_text,
+            cfg_scale_caption=cfg_scale_caption,
+            cfg_scale_speaker=cfg_scale_speaker,
+        )
+        messages: list[str] = []
+        stage_timings: list[tuple[str, float]] = []
+        stage_start = time.perf_counter()
+
+        with torch.inference_mode():
+            context = runtime._build_sampling_context(
+                request,
+                messages=messages,
+                log_fn=_ignore_log,
+            )
+            prepared = runtime.prepare_sampling_inputs(
+                request,
+                context,
+                messages=messages,
+                stage_timings=stage_timings,
+                log_fn=_ignore_log,
+            )
+            z_patched = runtime.generate_latent(
+                request,
+                context,
+                prepared,
+                stage_timings=stage_timings,
+                log_fn=_ignore_log,
+            )
+            latent = runtime.unpatchify_sampled_latent(
+                z_patched,
+                prepared,
+                stage_timings=stage_timings,
+                log_fn=_ignore_log,
+            )
+
+        decode_queue.put(
+            _DecodeJob(
+                index=index,
+                request=request,
+                context=context,
+                prepared=prepared,
+                latent=latent,
+                stage_timings=stage_timings,
+                stage_start=stage_start,
+                used_seed=int(context.used_seed),
+            )
+        )
+        used_seeds.append(int(context.used_seed))
+        print(f"[seed] segment[{index:03d}] used_seed: {context.used_seed}")
+        _drain_completed_results()
+
+    decode_queue.put(None)
+    while len(results_by_index) < len(segments):
+        _record_result(result_queue.get())
+    decode_queue.join()
+    worker.join(timeout=1.0)
+
+    assert sample_rate is not None
+    ordered_results = [results_by_index[index] for index in range(1, len(segments) + 1)]
+    if bool(args.save_segments):
+        for result in ordered_results:
+            segment_path = output_path.with_name(
+                f"{output_path.stem}_segment_{result.index:03d}{suffix}"
+            )
+            saved = save_wav(segment_path, result.audio, result.sample_rate)
+            print(f"Saved segment[{result.index:03d}]: {saved}")
+
+    final_audio = _concat_audio_segments(
+        [result.audio for result in ordered_results],
+        sample_rate=sample_rate,
+        silence_ms=float(args.segment_silence_ms),
+    )
+    out_path = save_wav(args.output_wav, final_audio, sample_rate)
+    print(f"Saved: {out_path}")
+
+    total_pipeline_time = time.perf_counter() - pipeline_t0
+    print(f"[pipeline] time_to_first_audio: {time_to_first_audio:.3f} s")
+    print(f"[pipeline] total_segmented_synthesis: {total_pipeline_time:.3f} s")
+    print(f"[pipeline] used_seeds: {used_seeds}")
+    if args.show_timings:
+        for result in ordered_results:
+            print(f"[timing] ---- segment[{result.index:03d}] ----")
+            _print_timings(result.stage_timings, result.total_to_decode)
+    return total_pipeline_time
+
+
 def run_from_args(
     args: argparse.Namespace,
     *,
@@ -639,6 +861,8 @@ def run_from_args(
         return
 
     runtime = create_pipeline_runtime(args)
+    if bool(args.pipeline_overlap):
+        return synthesize_segmented_text_pipelined(runtime, segments, args)
     return synthesize_segmented_text(runtime, segments, args)
 
 
