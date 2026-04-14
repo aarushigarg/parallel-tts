@@ -54,3 +54,4 @@ It contains code that segments the input text on punctuation.
 
 ## Warning
 The model takes a while so grab a coffee or watch some TV while it runs....
+PLEASE DO NOT COMMIT THE REPOSITORIES (iro_tts and dacvae) OR THE DATASET (transcript.txt)
