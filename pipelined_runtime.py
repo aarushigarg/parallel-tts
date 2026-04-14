@@ -24,9 +24,9 @@ from irodori_tts.codec import DACVAECodec, patchify_latent, unpatchify_latent
 from irodori_tts.config import ModelConfig
 from irodori_tts.lora import checkpoint_state_uses_lora
 from irodori_tts.model import TextToLatentRFDiT
-from irodori_tts.rf import sample_euler_rf_cfg
 from irodori_tts.text_normalization import normalize_text
 from irodori_tts.tokenizer import PretrainedTextTokenizer
+from pipelined_rf import sample_euler_rf_cfg
 
 
 def _is_mps_available() -> bool:
