@@ -7,11 +7,12 @@ import sys
 import time
 from pathlib import Path
 
+from text_segments import load_text_for_segmentation, split_text_segments
+
 IRO_TTS_DIR = Path(__file__).resolve().parent / "iro_tts"
 sys.path.insert(0, str(IRO_TTS_DIR))
 
 FIXED_SECONDS = 30.0
-SEGMENT_BOUNDARY_PUNCTUATION = set("。！？!?、，,；;：:」』）)]】〉》\n")
 
 
 def _parse_optional_float(value: str) -> float | None:
@@ -34,82 +35,6 @@ def _print_timings(timings: list[tuple[str, float]], total_to_decode: float) -> 
     for name, sec in timings:
         print(f"[timing] {name}: {sec * 1000.0:.1f} ms")
     print(f"[timing] total_to_decode: {total_to_decode:.3f} s")
-
-
-def _split_text_segments(text: str, *, min_chars: int, max_chars: int) -> list[str]:
-    cleaned = str(text).strip()
-    if cleaned == "":
-        return []
-
-    raw_segments: list[str] = []
-    current: list[str] = []
-    for ch in cleaned:
-        current.append(ch)
-        if ch in SEGMENT_BOUNDARY_PUNCTUATION:
-            segment = "".join(current).strip()
-            if segment:
-                raw_segments.append(segment)
-            current = []
-    tail = "".join(current).strip()
-    if tail:
-        raw_segments.append(tail)
-
-    if not raw_segments:
-        raw_segments = [cleaned]
-
-    sized_segments: list[str] = []
-    for segment in raw_segments:
-        if max_chars <= 0 or len(segment) <= max_chars:
-            sized_segments.append(segment)
-            continue
-        for start in range(0, len(segment), max_chars):
-            piece = segment[start : start + max_chars].strip()
-            if piece:
-                sized_segments.append(piece)
-
-    merged_segments: list[str] = []
-    pending = ""
-    for segment in sized_segments:
-        pending = f"{pending}{segment}" if pending else segment
-        if len(pending) >= min_chars:
-            merged_segments.append(pending)
-            pending = ""
-    if pending:
-        if merged_segments:
-            merged_segments[-1] = f"{merged_segments[-1]}{pending}"
-        else:
-            merged_segments.append(pending)
-
-    return merged_segments
-
-
-def _load_text_for_segmentation(args: argparse.Namespace) -> str:
-    if args.text is not None and str(args.text).strip() != "":
-        return str(args.text)
-    if args.text_file is None:
-        raise ValueError("Either --text or --text-file is required.")
-
-    path = Path(str(args.text_file)).expanduser()
-    max_lines = None if args.text_file_lines is None else int(args.text_file_lines)
-    texts: list[str] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            parts = stripped.split("|")
-            if len(parts) == 4:
-                text = parts[1].strip()
-            else:
-                text = stripped
-            if text:
-                texts.append(text)
-            if max_lines is not None and len(texts) >= max_lines:
-                break
-
-    if not texts:
-        raise ValueError(f"No text found in {path}.")
-    return "".join(texts)
 
 
 def _concat_audio_segments(
@@ -489,10 +414,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _prepare_segments(args: argparse.Namespace) -> list[str]:
-    text_input = _load_text_for_segmentation(args)
+    text_input = load_text_for_segmentation(
+        text=args.text,
+        text_file=args.text_file,
+        text_file_lines=args.text_file_lines,
+    )
 
     if bool(args.segment_text):
-        segments = _split_text_segments(
+        segments = split_text_segments(
             text_input,
             min_chars=max(1, int(args.segment_min_chars)),
             max_chars=int(args.segment_max_chars),

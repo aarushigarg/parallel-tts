@@ -49,5 +49,8 @@ The `serial.py` script implements the baseline serial pipeline. It takes a singl
 ### pipeline.py
 The `pipeline.py` script uses a modified inference script that will use pipelining for efficiency.
 
+### text_segments.py
+It contains code that segments the input text on punctuation. 
+
 ## Warning
 The model takes a while so grab a coffee or watch some TV while it runs....
