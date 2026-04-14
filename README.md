@@ -31,26 +31,85 @@ unzip -j japanese-single-speaker-speech-dataset.zip "*/transcript.txt"
 rm japanese-single-speaker-speech-dataset.zip
 ```
 ## Run
+
+Run one method:
+
 ```bash
 python main.py serial
 python main.py pipeline
 ```
+
+Run multiple methods in one command:
+
+```bash
+python main.py serial pipeline
+```
+
+By default, this runs 1 short, 1 medium, and 1 long text from `transcript.txt`.
+To run more samples from each length bucket:
+
+```bash
+python main.py serial pipeline -n 5
+```
+
+To run every valid row in `transcript.txt`:
+
+```bash
+python main.py pipeline --all
+```
+
+Use `--all` carefully. The dataset has thousands of rows and model inference can take a long time.
+
+If `transcript.txt` is somewhere else:
+
+```bash
+python main.py serial --dataset-root path/to/dataset-folder
+```
+
+Outputs are written per method:
+
+```text
+outputs/
+  buckets.csv
+  serial/
+    serial_results.csv
+    short_1.wav
+    medium_2.wav
+    long_3.wav
+  pipeline/
+    pipeline_results.csv
+    short_1.wav
+    medium_2.wav
+    long_3.wav
+```
+
+Each method subdirectory is cleared before that method runs. `outputs/buckets.csv` records the exact text inputs used for the run.
+
 ## How It Works
 
 ### preprocess.py
-The `preprocess.py` script processes the Japanese text dataset by categorizing phrases into three groups based on length: **short**, **medium**, and **long**. It then randomly samples *n* phrases from each category to be used as inputs for benchmarking.
+The `preprocess.py` script reads `transcript.txt`. Each transcript row is expected to use this format:
+
+```text
+wav_path|japanese_text|romaji_text|duration
+```
+
+Only the second field, `japanese_text`, is used as TTS input. The script categorizes phrases into three groups by character length: **short**, **medium**, and **long**. It then selects *n* evenly spaced texts from each category, or all texts when `--all` is used.
 
 ### main.py
-The `main.py` script runs the TTS model on each sampled phrase and measures the runtime for every input. The results are recorded and saved as a CSV file in the `outputs/` directory for analysis.
+The `main.py` script runs one or more benchmark methods on the selected texts and measures runtime for every input. Results are saved under `outputs/<method>/`.
 
 ### serial.py
 The `serial.py` script implements the baseline serial pipeline. It takes a single input text, runs the TTS model end-to-end using the Irodori-TTS inference script, and measures the total synthesis time. This serves as the reference point for evaluating performance improvements in later parallel implementations.
 
 ### pipeline.py
-The `pipeline.py` script uses a modified inference script that will use pipelining for efficiency.
+The `pipeline.py` script uses the refactored pipeline runtime. It loads `InferenceRuntime` once for the whole pipeline benchmark run and reuses it across inputs.
 
 ### text_segments.py
-It contains code that segments the input text on punctuation. 
+The `text_segments.py` script contains shared punctuation-based Japanese text segmentation. Both pipeline and chunk-parallel implementations should use this file so the benchmark compares scheduling strategy rather than different text boundaries.
+
+### pipelined_runtime.py
+The `pipelined_runtime.py` file is a local copy of the Irodori runtime with imports adjusted for this repo. Its inference flow has been split into callable stages such as input preparation, latent generation, latent unpatchifying, and waveform decoding. This is the base for implementing pipeline scheduling.
 
 ## Warning
 The model takes a while so grab a coffee or watch some TV while it runs....

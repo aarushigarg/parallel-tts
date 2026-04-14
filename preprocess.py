@@ -2,7 +2,7 @@ from pathlib import Path
 import csv
 
 def load_texts(dataset_root: Path):
-    transcript_path = dataset_root / "transcript.txt"
+    transcript_path = Path(dataset_root) / "transcript.txt"
 
     if not transcript_path.exists():
         raise FileNotFoundError(f"transcript.txt not found in {dataset_root}")
@@ -45,7 +45,7 @@ def select_n_evenly(items, n):
     return selected
 
 
-def get_length_buckets(dataset_root, n):
+def get_length_buckets(dataset_root, n=None):
     """
     Returns:
         short_list, medium_list, long_list
@@ -64,9 +64,14 @@ def get_length_buckets(dataset_root, n):
     medium_bucket = texts[third:2 * third]
     long_bucket = texts[2 * third:]
 
-    short_list = select_n_evenly(short_bucket, n)
-    medium_list = select_n_evenly(medium_bucket, n)
-    long_list = select_n_evenly(long_bucket, n)
+    if n is None:
+        short_list = short_bucket
+        medium_list = medium_bucket
+        long_list = long_bucket
+    else:
+        short_list = select_n_evenly(short_bucket, n)
+        medium_list = select_n_evenly(medium_bucket, n)
+        long_list = select_n_evenly(long_bucket, n)
 
     return short_list, medium_list, long_list
 
