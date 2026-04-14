@@ -16,6 +16,7 @@
 ### Download the dataset
 We use the Japanese Single Speaker Speech Dataset:
 https://www.kaggle.com/datasets/bryanpark/japanese-single-speaker-speech-dataset
+
 #### Manual Download
 1. Go to the link above
 2. Click **Download**
@@ -24,6 +25,7 @@ https://www.kaggle.com/datasets/bryanpark/japanese-single-speaker-speech-dataset
 ```bash
 unzip -j japanese-single-speaker-speech-dataset.zip "*/transcript.txt"
 ```
+
 #### With Kaggle
 ```bash
 kaggle datasets download -d bryanpark/japanese-single-speaker-speech-dataset
@@ -32,28 +34,30 @@ rm japanese-single-speaker-speech-dataset.zip
 ```
 ## Run
 
-Run one method:
+Ensure you are in the venv:
+```bash
+source .venv/bin/activate
+```
 
+Run one method:
 ```bash
 python main.py serial
 python main.py pipeline
 ```
 
 Run multiple methods in one command:
-
 ```bash
 python main.py serial pipeline
 ```
 
 By default, this runs 1 short, 1 medium, and 1 long text from `transcript.txt`.
-To run more samples from each length bucket:
 
+To run more samples from each length bucket:
 ```bash
 python main.py serial pipeline -n 5
 ```
 
 To run every valid row in `transcript.txt`:
-
 ```bash
 python main.py pipeline --all
 ```
@@ -61,13 +65,11 @@ python main.py pipeline --all
 Use `--all` carefully. The dataset has thousands of rows and model inference can take a long time.
 
 If `transcript.txt` is somewhere else:
-
 ```bash
 python main.py serial --dataset-root path/to/dataset-folder
 ```
 
 To run the pipeline implementation directly on a few transcript rows:
-
 ```bash
 python pipelined_infer.py \
   --hf-checkpoint Aratako/Irodori-TTS-500M-v2 \
@@ -79,13 +81,24 @@ python pipelined_infer.py \
 ```
 
 To check only the text splitting without loading the model:
-
 ```bash
 python pipelined_infer.py --text-file transcript.txt --text-file-lines 2 --dry-run-segments
 ```
 
-Outputs are written per method:
+Running pipelined version in Discovery CARC:
+```bash
+salloc --partition=gpu --gres=gpu:1 --cpus-per-task=4 --mem=32GB --time=2:00:00
+nvidia-smi
+python -c "import torch; print('torch:', torch.__version__); print('torch cuda build:', torch.version.cuda); print('cuda available:', torch.cuda.is_available())"
+```
+Ensure that a GPU is allocated, and cuda is available. 
 
+To leave the salloc:
+```bash
+exit
+```
+
+Outputs are written per method:
 ```text
 outputs/
   buckets.csv

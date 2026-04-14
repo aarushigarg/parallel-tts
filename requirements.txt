@@ -1,6 +1,10 @@
-torch
-torchaudio
-torchcodec
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.10.0+cu128; platform_system != "Darwin"
+torchaudio==2.10.0+cu128; platform_system != "Darwin"
+torch==2.10.0; platform_system == "Darwin"
+torchaudio==2.10.0; platform_system == "Darwin"
+torchcodec==0.10.0
 huggingface_hub
 transformers
 soundfile
