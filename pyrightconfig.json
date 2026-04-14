@@ -1,0 +1,18 @@
+{
+  "extraPaths": [
+    "iro_tts"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "iro_tts"
+      ]
+    }
+  ],
+  "exclude": [
+    ".venv",
+    "dacvae",
+    "iro_tts/.git"
+  ]
+}
