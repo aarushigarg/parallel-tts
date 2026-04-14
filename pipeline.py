@@ -54,7 +54,7 @@ class RFSplitPipelineTTSRunner:
         _configure_thread_env()
         if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
             raise RuntimeError(
-                "pipeline3 requires at least 2 CUDA GPUs. "
+                "pipeline2 requires at least 2 CUDA GPUs. "
                 f"torch.cuda.device_count()={torch.cuda.device_count()}."
             )
         self.split_step = split_step
@@ -73,11 +73,11 @@ class RFSplitPipelineTTSRunner:
         stage1_args.model_device = "cuda:1"
         stage1_args.codec_device = "cuda:1"
 
-        print("[pipeline3] loading stage 0 InferenceRuntime on cuda:0")
+        print("[pipeline2] loading stage 0 InferenceRuntime on cuda:0")
         self.runtime_stage0 = create_pipeline_runtime(stage0_args)
-        print("[pipeline3] loading stage 1 InferenceRuntime on cuda:1")
+        print("[pipeline2] loading stage 1 InferenceRuntime on cuda:1")
         self.runtime_stage1 = create_pipeline_runtime(stage1_args)
-        print("[pipeline3] InferenceRuntimes ready")
+        print("[pipeline2] InferenceRuntimes ready")
 
     def run(self, text, output_wav):
         args = copy(self.base_args)

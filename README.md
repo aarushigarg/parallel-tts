@@ -43,21 +43,20 @@ Run one method:
 ```bash
 python main.py serial
 python main.py pipeline
+python main.py pipeline1
 python main.py pipeline2
-python main.py pipeline3
 ```
 
 Run multiple methods in one command:
 ```bash
-python main.py serial pipeline2
-python main.py pipeline2 pipeline3
+python main.py serial pipeline1 pipeline2
 ```
 
 By default, this runs 1 short, 1 medium, and 1 long text from `transcript.txt`.
 
 To run more samples from each length bucket:
 ```bash
-python main.py pipeline2 pipeline3 -n 5
+python main.py pipeline1 pipeline2 -n 5
 ```
 
 To run every valid row in `transcript.txt`:
@@ -94,17 +93,17 @@ salloc --partition=gpu --constraint=a100 --gres=gpu:1 --cpus-per-task=4 --mem=32
 nvidia-smi
 source .venv/bin/activate
 python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
-python main.py pipeline2
+python main.py pipeline1
 ```
 Ensure that a GPU is allocated, and cuda is available. 
 
-`pipeline3` requires two GPUs:
+`pipeline2` requires two GPUs:
 ```bash
 salloc --partition=gpu --constraint=a100 --gres=gpu:2 --cpus-per-task=4 --mem=64GB --time=1:00:00
 nvidia-smi
 source .venv/bin/activate
 python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
-python main.py pipeline3
+python main.py pipeline2
 ```
 
 To leave the salloc:
@@ -126,11 +125,11 @@ outputs/
     short_1.wav
     medium_2.wav
     long_3.wav
+  pipeline1/
+    pipeline1_results.csv
+    short_1.wav
   pipeline2/
     pipeline2_results.csv
-    short_1.wav
-  pipeline3/
-    pipeline3_results.csv
     short_1.wav
 ```
 
@@ -159,19 +158,19 @@ The `pipeline.py` script uses the refactored pipeline runtime. It loads `Inferen
 There are two pipeline implementations:
 
 ```text
-pipeline / pipeline2:
+pipeline / pipeline1:
   one-GPU two-stage pipeline
   overlaps text -> latent   with   latent -> audio decoding
 
-pipeline3:
+pipeline2:
   two-GPU RF-split pipeline
   runs the first half of sample_rf on cuda:0 and the second half plus decode on cuda:1
   CPU waveform decoding is not viable for this model on the tested hardware. DACVAE decode must stay on GPU; otherwise decode dominates runtime.
 ```
 
-`pipeline` is currently an alias for `pipeline2` so older commands still work.
+`pipeline` is currently an alias for `pipeline1` so older commands still work.
 
-The `pipeline2` implementation splits each text input into punctuation-based segments, then runs the model in two overlapped stages:
+The `pipeline1` implementation splits each text input into punctuation-based segments, then runs the model in two overlapped stages:
 
 ```text
 main thread:    segment 1 text -> latent      segment 2 text -> latent
@@ -182,14 +181,14 @@ The latent is the model's internal audio representation. It is not a playable WA
 
 This means `pipeline` is not running all chunks independently at the same time. That would be chunk parallelism. The pipeline version overlaps different stages of consecutive segments: while the decode worker turns one segment's latent into audio, the main thread can start generating the next segment's latent.
 
-The `pipeline3` implementation splits the expensive RF sampling stage itself:
+The `pipeline2` implementation splits the expensive RF sampling stage itself:
 
 ```text
 GPU 0: segment 1 sample_rf steps 0-20      segment 2 sample_rf steps 0-20
 GPU 1:                                      segment 1 sample_rf steps 20-40 + decode
 ```
 
-This is more experimental and requires an allocation with at least two CUDA GPUs. It loads two full model runtimes, so it uses more GPU memory than `pipeline2`. Decode stays on `cuda:1` because CPU decode was much slower in testing.
+This is more experimental and requires an allocation with at least two CUDA GPUs. It loads two full model runtimes, so it uses more GPU memory than `pipeline1`. Decode stays on `cuda:1` because CPU decode was much slower in testing.
 
 ### text_segments.py
 The `text_segments.py` script contains shared punctuation-based Japanese text segmentation. Both pipeline and chunk-parallel implementations should use this file so the benchmark compares scheduling strategy rather than different text boundaries.
@@ -198,7 +197,7 @@ The `text_segments.py` script contains shared punctuation-based Japanese text se
 The `pipelined_runtime.py` file is a local copy of the Irodori runtime with imports adjusted for this repo. Its inference flow has been split into callable stages such as input preparation, latent generation, latent unpatchifying, and waveform decoding. The pipeline code calls these stages directly instead of calling the original end-to-end `runtime.synthesize(...)` function for every segment.
 
 ### pipelined_rf.py
-The `pipelined_rf.py` file is a local copy of the rectified flow sampler. It adds `sample_euler_rf_cfg_range`, which can run only part of the RF sampling loop. `pipeline3` uses this to run one range of RF steps on `cuda:0`, pass the intermediate latent to `cuda:1`, and finish the remaining RF steps there.
+The `pipelined_rf.py` file is a local copy of the rectified flow sampler. It adds `sample_euler_rf_cfg_range`, which can run only part of the RF sampling loop. `pipeline2` uses this to run one range of RF steps on `cuda:0`, pass the intermediate latent to `cuda:1`, and finish the remaining RF steps there.
 
 ## Warning
 The model takes a while so grab a coffee or watch some TV while it runs....

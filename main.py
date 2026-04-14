@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument(
         "methods",
         nargs="+",
-        choices=["serial", "pipeline", "pipeline2", "pipeline3"],
+        choices=["serial", "pipeline", "pipeline1", "pipeline2"],
         help="Inference runner(s) to use.",
     )
     parser.add_argument(
@@ -56,10 +56,10 @@ def run_method(method, categorized_texts):
 
     if method == "serial":
         run_tts = run_serial_tts
-    elif method in {"pipeline", "pipeline2"}:
+    elif method in {"pipeline", "pipeline1"}:
         pipeline_runner = PipelineTTSRunner()
         run_tts = pipeline_runner.run
-    elif method == "pipeline3":
+    elif method == "pipeline2":
         pipeline_runner = RFSplitPipelineTTSRunner()
         run_tts = pipeline_runner.run
     else:

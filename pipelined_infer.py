@@ -1078,10 +1078,10 @@ def synthesize_segmented_text_rf_split(
     print(f"Saved: {out_path}")
 
     total_pipeline_time = time.perf_counter() - pipeline_t0
-    print(f"[pipeline3] split_step: {split_step}/{num_steps}")
-    print(f"[pipeline3] time_to_first_audio: {time_to_first_audio:.3f} s")
-    print(f"[pipeline3] total_segmented_synthesis: {total_pipeline_time:.3f} s")
-    print(f"[pipeline3] used_seeds: {used_seeds}")
+    print(f"[pipeline2] split_step: {split_step}/{num_steps}")
+    print(f"[pipeline2] time_to_first_audio: {time_to_first_audio:.3f} s")
+    print(f"[pipeline2] total_segmented_synthesis: {total_pipeline_time:.3f} s")
+    print(f"[pipeline2] used_seeds: {used_seeds}")
     if args.show_timings:
         for result in ordered_results:
             print(f"[timing] ---- segment[{result.index:03d}] ----")
