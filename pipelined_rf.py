@@ -121,7 +121,7 @@ def scale_speaker_kv_cache(
 
 
 @torch.inference_mode()
-def sample_euler_rf_cfg(
+def sample_euler_rf_cfg_range(
     model: TextToLatentRFDiT,
     text_input_ids: torch.Tensor,
     text_mask: torch.Tensor,
@@ -146,26 +146,49 @@ def sample_euler_rf_cfg(
     speaker_kv_scale: float | None = None,
     speaker_kv_max_layers: int | None = None,
     speaker_kv_min_t: float | None = None,
+    initial_x_t: torch.Tensor | None = None,
+    start_step: int = 0,
+    end_step: int | None = None,
 ) -> torch.Tensor:
     """
-    Euler sampling over RF ODE with text/reference/caption conditioning CFG.
+    Euler sampling over a range of RF ODE steps with text/reference/caption conditioning CFG.
 
     Returns:
-      latent sequence in patched space, shape (B, sequence_length, patched_latent_dim)
+      latent sequence in patched space after end_step, shape (B, sequence_length, patched_latent_dim)
     """
     device = model.device
     dtype = model.dtype
     batch_size = text_input_ids.shape[0]
     latent_dim = model.cfg.patched_latent_dim
+    end_step = num_steps if end_step is None else int(end_step)
+    start_step = int(start_step)
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be > 0, got {num_steps}")
+    if not (0 <= start_step <= end_step <= num_steps):
+        raise ValueError(
+            f"Expected 0 <= start_step <= end_step <= num_steps, got "
+            f"start_step={start_step}, end_step={end_step}, num_steps={num_steps}."
+        )
 
-    rng, rng_device = _make_rng(seed=seed, device=device)
-    x_t = torch.randn(
-        (batch_size, sequence_length, latent_dim), device=rng_device, dtype=dtype, generator=rng
-    )
-    if rng_device != device:
-        x_t = x_t.to(device=device)
-    if truncation_factor is not None:
-        x_t = x_t * float(truncation_factor)
+    if initial_x_t is None:
+        rng, rng_device = _make_rng(seed=seed, device=device)
+        x_t = torch.randn(
+            (batch_size, sequence_length, latent_dim),
+            device=rng_device,
+            dtype=dtype,
+            generator=rng,
+        )
+        if rng_device != device:
+            x_t = x_t.to(device=device)
+        if truncation_factor is not None:
+            x_t = x_t * float(truncation_factor)
+    else:
+        expected_shape = (batch_size, sequence_length, latent_dim)
+        if tuple(initial_x_t.shape) != expected_shape:
+            raise ValueError(
+                f"initial_x_t shape must be {expected_shape}, got {tuple(initial_x_t.shape)}."
+            )
+        x_t = initial_x_t.to(device=device, dtype=dtype)
 
     if cfg_scale is not None:
         # Backward compatibility for old single-scale caller.
@@ -401,6 +424,8 @@ def sample_euler_rf_cfg(
                     caption_state=bundle[4],
                 )
     if speaker_kv_scale is not None:
+        if context_kv_cond is None:
+            raise RuntimeError("speaker_kv_scale requires context KV cache to be initialized.")
         scale_speaker_kv_cache(
             context_kv_cache=context_kv_cond,
             scale=float(speaker_kv_scale),
@@ -420,10 +445,10 @@ def sample_euler_rf_cfg(
             )
     speaker_kv_active = speaker_kv_scale is not None
 
-    for i in range(num_steps):
+    for i in range(start_step, end_step):
         t = t_schedule[i]
         t_next = t_schedule[i + 1]
-        tt = torch.full((batch_size,), t, device=device, dtype=dtype)
+        tt = torch.full((batch_size,), float(t.item()), device=device, dtype=dtype)
 
         use_cfg = bool(enabled_cfg_names) and (cfg_min_t <= t.item() <= cfg_max_t)
         if use_cfg:
@@ -523,6 +548,9 @@ def sample_euler_rf_cfg(
             and (t_next < speaker_kv_min_t)
             and (t >= speaker_kv_min_t)
         ):
+            assert speaker_kv_scale is not None
+            if context_kv_cond is None:
+                raise RuntimeError("speaker_kv_scale requires context KV cache to be initialized.")
             inv_scale = 1.0 / float(speaker_kv_scale)
             scale_speaker_kv_cache(
                 context_kv_cache=context_kv_cond,
@@ -546,3 +574,13 @@ def sample_euler_rf_cfg(
         x_t = x_t + v * (t_next - t)
 
     return x_t
+
+
+@torch.inference_mode()
+def sample_euler_rf_cfg(*args, **kwargs) -> torch.Tensor:
+    """
+    Backward-compatible full RF sampler.
+
+    Use sample_euler_rf_cfg_range for partial sampling over a step range.
+    """
+    return sample_euler_rf_cfg_range(*args, **kwargs)

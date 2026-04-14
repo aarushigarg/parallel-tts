@@ -26,7 +26,7 @@ from irodori_tts.lora import checkpoint_state_uses_lora
 from irodori_tts.model import TextToLatentRFDiT
 from irodori_tts.text_normalization import normalize_text
 from irodori_tts.tokenizer import PretrainedTextTokenizer
-from pipelined_rf import sample_euler_rf_cfg
+from pipelined_rf import sample_euler_rf_cfg, sample_euler_rf_cfg_range
 
 
 def _is_mps_available() -> bool:
@@ -647,8 +647,9 @@ class InferenceRuntime:
             )
         if batch_size > 1:
             ref_latent_patched = ref_latent_patched.repeat(batch_size, 1, 1)
+        ref_steps = int(ref_latent_patched.shape[1])
         ref_mask = torch.ones(
-            (batch_size, ref_latent_patched.shape[1]), dtype=torch.bool, device=self.model_device
+            (batch_size, ref_steps), dtype=torch.bool, device=self.model_device
         )
         return ref_latent_patched, ref_mask
 
@@ -891,6 +892,57 @@ class InferenceRuntime:
         stage_sec = _measure_end(self.model_device, t0)
         stage_timings.append(("sample_rf", stage_sec))
         log_fn(f"[runtime] sample_rf: {stage_sec * 1000.0:.1f} ms")
+        return z_patched
+
+    def generate_latent_range(
+        self,
+        req: SamplingRequest,
+        ctx: SamplingContext,
+        prepared: PreparedSamplingInputs,
+        *,
+        start_step: int,
+        end_step: int,
+        initial_x_t: torch.Tensor | None = None,
+        stage_timings: list[tuple[str, float]],
+        log_fn: Callable[[str], None],
+        timing_name: str | None = None,
+    ) -> torch.Tensor:
+        t0 = _measure_start(self.model_device)
+        z_patched = sample_euler_rf_cfg_range(
+            model=self.model,
+            text_input_ids=prepared.text_ids,
+            text_mask=prepared.text_mask,
+            ref_latent=prepared.ref_latent,
+            ref_mask=prepared.ref_mask,
+            sequence_length=prepared.patched_steps,
+            caption_input_ids=prepared.caption_ids,
+            caption_mask=prepared.caption_mask,
+            num_steps=int(req.num_steps),
+            cfg_scale_text=ctx.cfg_scale_text,
+            cfg_scale_caption=ctx.cfg_scale_caption,
+            cfg_scale_speaker=ctx.cfg_scale_speaker,
+            cfg_guidance_mode=ctx.cfg_mode,
+            cfg_min_t=float(req.cfg_min_t),
+            cfg_max_t=float(req.cfg_max_t),
+            seed=ctx.used_seed,
+            truncation_factor=ctx.truncation_factor,
+            rescale_k=ctx.rescale_k,
+            rescale_sigma=ctx.rescale_sigma,
+            use_context_kv_cache=bool(req.context_kv_cache),
+            speaker_kv_scale=ctx.speaker_kv_scale,
+            speaker_kv_max_layers=ctx.speaker_kv_max_layers,
+            speaker_kv_min_t=ctx.speaker_kv_min_t,
+            initial_x_t=initial_x_t,
+            start_step=int(start_step),
+            end_step=int(end_step),
+        )
+        stage_sec = _measure_end(self.model_device, t0)
+        label = timing_name or f"sample_rf_{int(start_step)}_{int(end_step)}"
+        stage_timings.append((label, stage_sec))
+        log_fn(
+            f"[runtime] {label}: {stage_sec * 1000.0:.1f} ms "
+            f"(steps {int(start_step)}-{int(end_step)})"
+        )
         return z_patched
 
     def unpatchify_sampled_latent(

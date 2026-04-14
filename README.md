@@ -43,18 +43,21 @@ Run one method:
 ```bash
 python main.py serial
 python main.py pipeline
+python main.py pipeline2
+python main.py pipeline3
 ```
 
 Run multiple methods in one command:
 ```bash
-python main.py serial pipeline
+python main.py serial pipeline2
+python main.py pipeline2 pipeline3
 ```
 
 By default, this runs 1 short, 1 medium, and 1 long text from `transcript.txt`.
 
 To run more samples from each length bucket:
 ```bash
-python main.py serial pipeline -n 5
+python main.py pipeline2 pipeline3 -n 5
 ```
 
 To run every valid row in `transcript.txt`:
@@ -93,6 +96,14 @@ python -c "import torch; print('torch:', torch.__version__); print('torch cuda b
 ```
 Ensure that a GPU is allocated, and cuda is available. 
 
+`pipeline3` requires two GPUs:
+```bash
+salloc --partition=gpu --gres=gpu:2 --cpus-per-task=4 --mem=48GB --time=2:00:00
+nvidia-smi
+python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
+python main.py pipeline2 pipeline3 -n 1
+```
+
 To leave the salloc:
 ```bash
 exit
@@ -112,6 +123,12 @@ outputs/
     short_1.wav
     medium_2.wav
     long_3.wav
+  pipeline2/
+    pipeline2_results.csv
+    short_1.wav
+  pipeline3/
+    pipeline3_results.csv
+    short_1.wav
 ```
 
 Each method subdirectory is cleared before that method runs. `outputs/buckets.csv` records the exact text inputs used for the run.
@@ -136,7 +153,21 @@ The `serial.py` script implements the baseline serial pipeline. It takes a singl
 ### pipeline.py
 The `pipeline.py` script uses the refactored pipeline runtime. It loads `InferenceRuntime` once for the whole pipeline benchmark run and reuses it across inputs.
 
-The pipeline implementation splits each text input into punctuation-based segments, then runs the model in two overlapped stages:
+There are two pipeline implementations:
+
+```text
+pipeline / pipeline2:
+  one-GPU two-stage pipeline
+  overlaps text -> latent   with   latent -> audio decoding
+
+pipeline3:
+  two-GPU RF-split pipeline
+  runs the first half of sample_rf on cuda:0 and the second half on cuda:1
+```
+
+`pipeline` is currently an alias for `pipeline2` so older commands still work.
+
+The `pipeline2` implementation splits each text input into punctuation-based segments, then runs the model in two overlapped stages:
 
 ```text
 main thread:    segment 1 text -> latent      segment 2 text -> latent
@@ -147,11 +178,23 @@ The latent is the model's internal audio representation. It is not a playable WA
 
 This means `pipeline` is not running all chunks independently at the same time. That would be chunk parallelism. The pipeline version overlaps different stages of consecutive segments: while the decode worker turns one segment's latent into audio, the main thread can start generating the next segment's latent.
 
+The `pipeline3` implementation splits the expensive RF sampling stage itself:
+
+```text
+GPU 0: segment 1 sample_rf steps 0-20      segment 2 sample_rf steps 0-20
+GPU 1:                                      segment 1 sample_rf steps 20-40 + decode
+```
+
+This is more experimental and requires an allocation with at least two CUDA GPUs. It loads two full model runtimes, so it uses more GPU memory than `pipeline2`.
+
 ### text_segments.py
 The `text_segments.py` script contains shared punctuation-based Japanese text segmentation. Both pipeline and chunk-parallel implementations should use this file so the benchmark compares scheduling strategy rather than different text boundaries.
 
 ### pipelined_runtime.py
 The `pipelined_runtime.py` file is a local copy of the Irodori runtime with imports adjusted for this repo. Its inference flow has been split into callable stages such as input preparation, latent generation, latent unpatchifying, and waveform decoding. The pipeline code calls these stages directly instead of calling the original end-to-end `runtime.synthesize(...)` function for every segment.
+
+### pipelined_rf.py
+The `pipelined_rf.py` file is a local copy of the rectified flow sampler. It adds `sample_euler_rf_cfg_range`, which can run only part of the RF sampling loop. `pipeline3` uses this to run one range of RF steps on `cuda:0`, pass the intermediate latent to `cuda:1`, and finish the remaining RF steps there.
 
 ## Warning
 The model takes a while so grab a coffee or watch some TV while it runs....

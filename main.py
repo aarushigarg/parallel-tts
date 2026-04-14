@@ -4,7 +4,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from pipeline import PipelineTTSRunner
+from pipeline import PipelineTTSRunner, RFSplitPipelineTTSRunner
 from preprocess import get_length_buckets, save_buckets_to_csv
 from serial import run_serial_tts
 
@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument(
         "methods",
         nargs="+",
-        choices=["serial", "pipeline"],
+        choices=["serial", "pipeline", "pipeline2", "pipeline3"],
         help="Inference runner(s) to use.",
     )
     parser.add_argument(
@@ -56,9 +56,14 @@ def run_method(method, categorized_texts):
 
     if method == "serial":
         run_tts = run_serial_tts
-    else:
+    elif method in {"pipeline", "pipeline2"}:
         pipeline_runner = PipelineTTSRunner()
         run_tts = pipeline_runner.run
+    elif method == "pipeline3":
+        pipeline_runner = RFSplitPipelineTTSRunner()
+        run_tts = pipeline_runner.run
+    else:
+        raise ValueError(f"Unsupported method: {method}")
 
     program_start = datetime.now()
     program_start_str = program_start.strftime("%Y-%m-%d %H:%M:%S")

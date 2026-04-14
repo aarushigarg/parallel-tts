@@ -42,6 +42,20 @@ class _DecodeResult:
     completed_at: float
 
 
+@dataclass
+class _RfSplitJob:
+    index: int
+    request: Any
+    context: Any
+    prepared_stage1: Any
+    mid_latent: Any
+    stage_timings: list[tuple[str, float]]
+    stage_start: float
+    used_seed: int
+    split_step: int
+    num_steps: int
+
+
 def _parse_optional_float(value: str) -> float | None:
     raw = str(value).strip().lower()
     if raw in {"none", "null", "off", "disable", "disabled"}:
@@ -88,6 +102,24 @@ def _concat_audio_segments(
             parts.append(silence)
         parts.append(audio)
     return torch.cat(parts, dim=-1)
+
+
+def _move_optional_tensor(value, device):
+    return None if value is None else value.to(device)
+
+
+def _move_prepared_inputs(prepared, device):
+    return prepared.__class__(
+        text_ids=prepared.text_ids.to(device),
+        text_mask=prepared.text_mask.to(device),
+        caption_ids=_move_optional_tensor(prepared.caption_ids, device),
+        caption_mask=_move_optional_tensor(prepared.caption_mask, device),
+        ref_latent=_move_optional_tensor(prepared.ref_latent, device),
+        ref_mask=_move_optional_tensor(prepared.ref_mask, device),
+        target_samples=prepared.target_samples,
+        latent_steps=prepared.latent_steps,
+        patched_steps=prepared.patched_steps,
+    )
 
 
 def _resolve_checkpoint_path(args: argparse.Namespace) -> str:
@@ -646,7 +678,8 @@ def synthesize_segmented_text(
             saved = save_wav(segment_path, result.audio, result.sample_rate)
             print(f"Saved segment[{index:03d}]: {saved}")
 
-    assert sample_rate is not None
+    if sample_rate is None:
+        raise RuntimeError("No audio segments were synthesized.")
     final_audio = _concat_audio_segments(
         segment_audios,
         sample_rate=sample_rate,
@@ -815,8 +848,9 @@ def synthesize_segmented_text_pipelined(
     decode_queue.join()
     worker.join(timeout=1.0)
 
-    assert sample_rate is not None
     ordered_results = [results_by_index[index] for index in range(1, len(segments) + 1)]
+    sample_rate = ordered_results[0].sample_rate
+    time_to_first_audio = ordered_results[0].completed_at - pipeline_t0
     if bool(args.save_segments):
         for result in ordered_results:
             segment_path = output_path.with_name(
@@ -837,6 +871,217 @@ def synthesize_segmented_text_pipelined(
     print(f"[pipeline] time_to_first_audio: {time_to_first_audio:.3f} s")
     print(f"[pipeline] total_segmented_synthesis: {total_pipeline_time:.3f} s")
     print(f"[pipeline] used_seeds: {used_seeds}")
+    if args.show_timings:
+        for result in ordered_results:
+            print(f"[timing] ---- segment[{result.index:03d}] ----")
+            _print_timings(result.stage_timings, result.total_to_decode)
+    return total_pipeline_time
+
+
+def synthesize_segmented_text_rf_split(
+    runtime_stage0,
+    runtime_stage1,
+    segments: list[str],
+    args: argparse.Namespace,
+    *,
+    split_step: int | None = None,
+) -> float:
+    import torch
+
+    _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
+    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker = _resolve_request_cfg_scales(
+        args,
+        runtime_stage0,
+    )
+    num_steps = int(args.num_steps)
+    if num_steps <= 1:
+        raise ValueError("RF-split pipeline requires --num-steps > 1.")
+    split_step = num_steps // 2 if split_step is None else int(split_step)
+    if not (0 < split_step < num_steps):
+        raise ValueError(
+            f"RF split step must be between 1 and num_steps-1, got split_step={split_step}, "
+            f"num_steps={num_steps}."
+        )
+
+    output_path = Path(str(args.output_wav))
+    suffix = output_path.suffix if output_path.suffix else ".wav"
+    stage1_queue: Queue[_RfSplitJob | None] = Queue()
+    result_queue: Queue[_DecodeResult | BaseException] = Queue()
+    results_by_index: dict[int, _DecodeResult] = {}
+    used_seeds: list[int] = []
+    sample_rate: int | None = None
+    time_to_first_audio: float | None = None
+    pipeline_t0 = time.perf_counter()
+
+    def _ignore_log(_msg: str) -> None:
+        return
+
+    def _stage1_worker() -> None:
+        while True:
+            job = stage1_queue.get()
+            try:
+                if job is None:
+                    return
+                try:
+                    with torch.inference_mode():
+                        mid_latent = job.mid_latent.to(runtime_stage1.model_device)
+                        z_patched = runtime_stage1.generate_latent_range(
+                            job.request,
+                            job.context,
+                            job.prepared_stage1,
+                            start_step=job.split_step,
+                            end_step=job.num_steps,
+                            initial_x_t=mid_latent,
+                            stage_timings=job.stage_timings,
+                            log_fn=_ignore_log,
+                            timing_name=f"sample_rf_steps_{job.split_step}_{job.num_steps}",
+                        )
+                        z = runtime_stage1.unpatchify_sampled_latent(
+                            z_patched,
+                            job.prepared_stage1,
+                            stage_timings=job.stage_timings,
+                            log_fn=_ignore_log,
+                        )
+                        audios = runtime_stage1.decode_audio(
+                            job.request,
+                            job.context,
+                            job.prepared_stage1,
+                            z,
+                            stage_timings=job.stage_timings,
+                            log_fn=_ignore_log,
+                        )
+                    if not audios:
+                        raise RuntimeError(f"Segment {job.index} produced no decoded audio.")
+                    result_queue.put(
+                        _DecodeResult(
+                            index=job.index,
+                            audio=audios[0],
+                            sample_rate=int(runtime_stage1.codec.sample_rate),
+                            stage_timings=job.stage_timings,
+                            total_to_decode=time.perf_counter() - job.stage_start,
+                            used_seed=job.used_seed,
+                            completed_at=time.perf_counter(),
+                        )
+                    )
+                except BaseException as exc:
+                    result_queue.put(exc)
+                    return
+            finally:
+                stage1_queue.task_done()
+
+    def _record_result(item: _DecodeResult | BaseException) -> None:
+        nonlocal sample_rate, time_to_first_audio
+        if isinstance(item, BaseException):
+            raise item
+        if sample_rate is None:
+            sample_rate = item.sample_rate
+        elif item.sample_rate != sample_rate:
+            raise ValueError(
+                f"Segment {item.index} sample_rate={item.sample_rate} did not match {sample_rate}."
+            )
+        results_by_index[item.index] = item
+        if time_to_first_audio is None:
+            time_to_first_audio = item.completed_at - pipeline_t0
+
+    def _drain_completed_results() -> None:
+        while True:
+            try:
+                item = result_queue.get_nowait()
+            except Empty:
+                return
+            _record_result(item)
+
+    worker = Thread(target=_stage1_worker, name="tts-rf-split-worker", daemon=True)
+    worker.start()
+
+    for index, segment in enumerate(segments, start=1):
+        segment_seed = None if args.seed is None else int(args.seed) + index - 1
+        request = _build_sampling_request(
+            SamplingRequest,
+            args=args,
+            text=segment,
+            seed=segment_seed,
+            cfg_scale_text=cfg_scale_text,
+            cfg_scale_caption=cfg_scale_caption,
+            cfg_scale_speaker=cfg_scale_speaker,
+        )
+        messages: list[str] = []
+        stage_timings: list[tuple[str, float]] = []
+        stage_start = time.perf_counter()
+
+        with torch.inference_mode():
+            context = runtime_stage0._build_sampling_context(
+                request,
+                messages=messages,
+                log_fn=_ignore_log,
+            )
+            prepared_stage0 = runtime_stage0.prepare_sampling_inputs(
+                request,
+                context,
+                messages=messages,
+                stage_timings=stage_timings,
+                log_fn=_ignore_log,
+            )
+            prepared_stage1 = _move_prepared_inputs(prepared_stage0, runtime_stage1.model_device)
+            mid_latent = runtime_stage0.generate_latent_range(
+                request,
+                context,
+                prepared_stage0,
+                start_step=0,
+                end_step=split_step,
+                stage_timings=stage_timings,
+                log_fn=_ignore_log,
+                timing_name=f"sample_rf_steps_0_{split_step}",
+            )
+
+        stage1_queue.put(
+            _RfSplitJob(
+                index=index,
+                request=request,
+                context=context,
+                prepared_stage1=prepared_stage1,
+                mid_latent=mid_latent,
+                stage_timings=stage_timings,
+                stage_start=stage_start,
+                used_seed=int(context.used_seed),
+                split_step=split_step,
+                num_steps=num_steps,
+            )
+        )
+        used_seeds.append(int(context.used_seed))
+        print(f"[seed] segment[{index:03d}] used_seed: {context.used_seed}")
+        _drain_completed_results()
+
+    stage1_queue.put(None)
+    while len(results_by_index) < len(segments):
+        _record_result(result_queue.get())
+    stage1_queue.join()
+    worker.join(timeout=1.0)
+
+    ordered_results = [results_by_index[index] for index in range(1, len(segments) + 1)]
+    sample_rate = ordered_results[0].sample_rate
+    time_to_first_audio = ordered_results[0].completed_at - pipeline_t0
+    if bool(args.save_segments):
+        for result in ordered_results:
+            segment_path = output_path.with_name(
+                f"{output_path.stem}_segment_{result.index:03d}{suffix}"
+            )
+            saved = save_wav(segment_path, result.audio, result.sample_rate)
+            print(f"Saved segment[{result.index:03d}]: {saved}")
+
+    final_audio = _concat_audio_segments(
+        [result.audio for result in ordered_results],
+        sample_rate=sample_rate,
+        silence_ms=float(args.segment_silence_ms),
+    )
+    out_path = save_wav(args.output_wav, final_audio, sample_rate)
+    print(f"Saved: {out_path}")
+
+    total_pipeline_time = time.perf_counter() - pipeline_t0
+    print(f"[pipeline3] split_step: {split_step}/{num_steps}")
+    print(f"[pipeline3] time_to_first_audio: {time_to_first_audio:.3f} s")
+    print(f"[pipeline3] total_segmented_synthesis: {total_pipeline_time:.3f} s")
+    print(f"[pipeline3] used_seeds: {used_seeds}")
     if args.show_timings:
         for result in ordered_results:
             print(f"[timing] ---- segment[{result.index:03d}] ----")
