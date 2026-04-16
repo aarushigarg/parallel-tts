@@ -20,6 +20,15 @@ FIXED_SECONDS = 30.0
 
 
 @dataclass
+class SegmentedSynthesisMetrics:
+    total_synthesis_sec: float
+    time_to_first_audio_sec: float
+    sample_rate: int
+    stage_timings: dict[str, float]
+    segment_count: int
+
+
+@dataclass
 class _DecodeJob:
     index: int
     request: Any
@@ -76,6 +85,30 @@ def _print_timings(timings: list[tuple[str, float]], total_to_decode: float) -> 
     for name, sec in timings:
         print(f"[timing] {name}: {sec * 1000.0:.1f} ms")
     print(f"[timing] total_to_decode: {total_to_decode:.3f} s")
+
+
+def _aggregate_stage_timings(
+    segment_entries: list[tuple[int, list[tuple[str, float]], float]] | list[_DecodeResult],
+) -> dict[str, float]:
+    aggregated: dict[str, float] = {}
+    if not segment_entries:
+        return aggregated
+
+    if isinstance(segment_entries[0], tuple):
+        iterable = (
+            timings + [("total_to_decode", total_to_decode)]
+            for _, timings, total_to_decode in segment_entries
+        )
+    else:
+        iterable = (
+            result.stage_timings + [("total_to_decode", result.total_to_decode)]
+            for result in segment_entries
+        )
+
+    for timings in iterable:
+        for name, sec in timings:
+            aggregated[name] = aggregated.get(name, 0.0) + float(sec)
+    return aggregated
 
 
 def _concat_audio_segments(
@@ -628,7 +661,7 @@ def synthesize_segmented_text(
     runtime,
     segments: list[str],
     args: argparse.Namespace,
-) -> float:
+) -> SegmentedSynthesisMetrics:
     _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
     cfg_scale_text, cfg_scale_caption, cfg_scale_speaker = _resolve_request_cfg_scales(
         args,
@@ -696,14 +729,20 @@ def synthesize_segmented_text(
         for index, timings, total_to_decode in segment_timings:
             print(f"[timing] ---- segment[{index:03d}] ----")
             _print_timings(timings, total_to_decode)
-    return total_pipeline_time
+    return SegmentedSynthesisMetrics(
+        total_synthesis_sec=total_pipeline_time,
+        time_to_first_audio_sec=float(time_to_first_audio or total_pipeline_time),
+        sample_rate=sample_rate,
+        stage_timings=_aggregate_stage_timings(segment_timings),
+        segment_count=len(segments),
+    )
 
 
 def synthesize_segmented_text_pipelined(
     runtime,
     segments: list[str],
     args: argparse.Namespace,
-) -> float:
+) -> SegmentedSynthesisMetrics:
     import torch
 
     _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
@@ -875,7 +914,13 @@ def synthesize_segmented_text_pipelined(
         for result in ordered_results:
             print(f"[timing] ---- segment[{result.index:03d}] ----")
             _print_timings(result.stage_timings, result.total_to_decode)
-    return total_pipeline_time
+    return SegmentedSynthesisMetrics(
+        total_synthesis_sec=total_pipeline_time,
+        time_to_first_audio_sec=float(time_to_first_audio or total_pipeline_time),
+        sample_rate=sample_rate,
+        stage_timings=_aggregate_stage_timings(ordered_results),
+        segment_count=len(segments),
+    )
 
 
 def synthesize_segmented_text_rf_split(
@@ -885,7 +930,7 @@ def synthesize_segmented_text_rf_split(
     args: argparse.Namespace,
     *,
     split_step: int | None = None,
-) -> float:
+) -> SegmentedSynthesisMetrics:
     import torch
 
     _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
@@ -1086,7 +1131,13 @@ def synthesize_segmented_text_rf_split(
         for result in ordered_results:
             print(f"[timing] ---- segment[{result.index:03d}] ----")
             _print_timings(result.stage_timings, result.total_to_decode)
-    return total_pipeline_time
+    return SegmentedSynthesisMetrics(
+        total_synthesis_sec=total_pipeline_time,
+        time_to_first_audio_sec=float(time_to_first_audio or total_pipeline_time),
+        sample_rate=sample_rate,
+        stage_timings=_aggregate_stage_timings(ordered_results),
+        segment_count=len(segments),
+    )
 
 
 def run_from_args(

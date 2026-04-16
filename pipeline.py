@@ -2,6 +2,7 @@ import os
 import time
 from copy import copy
 
+from benchmarking import make_benchmark_result
 from pipelined_infer import (
     create_pipeline_runtime,
     parse_pipeline_args,
@@ -42,9 +43,19 @@ class PipelineTTSRunner:
 
         segments = prepare_segments(args)
         start = time.time()
-        synthesize_segmented_text_pipelined(self.runtime, segments, args)
+        metrics = synthesize_segmented_text_pipelined(self.runtime, segments, args)
         end = time.time()
-        return end - start
+        notes = [f"segmented into {metrics.segment_count} chunk(s)"]
+        return make_benchmark_result(
+            method="pipeline1",
+            total_synthesis_sec=end - start,
+            time_to_first_audio_sec=metrics.time_to_first_audio_sec,
+            output_wav=output_wav,
+            num_characters=len(text),
+            sample_rate=metrics.sample_rate,
+            notes=notes,
+            stage_timings=metrics.stage_timings,
+        )
 
 
 class RFSplitPipelineTTSRunner:
@@ -88,7 +99,7 @@ class RFSplitPipelineTTSRunner:
 
         segments = prepare_segments(args)
         start = time.time()
-        synthesize_segmented_text_rf_split(
+        metrics = synthesize_segmented_text_rf_split(
             self.runtime_stage0,
             self.runtime_stage1,
             segments,
@@ -96,7 +107,17 @@ class RFSplitPipelineTTSRunner:
             split_step=self.split_step,
         )
         end = time.time()
-        return end - start
+        notes = [f"segmented into {metrics.segment_count} chunk(s)"]
+        return make_benchmark_result(
+            method="pipeline2",
+            total_synthesis_sec=end - start,
+            time_to_first_audio_sec=metrics.time_to_first_audio_sec,
+            output_wav=output_wav,
+            num_characters=len(text),
+            sample_rate=metrics.sample_rate,
+            notes=notes,
+            stage_timings=metrics.stage_timings,
+        )
 
 
 _DEFAULT_RUNNER = None

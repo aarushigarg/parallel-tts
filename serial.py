@@ -4,6 +4,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from benchmarking import make_benchmark_result
+
 REPO_DIR = Path("iro_tts")
 
 def run_serial_tts(text, output_wav):
@@ -26,4 +28,16 @@ def run_serial_tts(text, output_wav):
     subprocess.run(cmd, check=True, cwd=REPO_DIR, env=env)
     end = time.time()
 
-    return end - start
+    runtime = end - start
+    notes = [
+        "serial baseline runs the upstream infer.py CLI",
+        "time_to_first_audio_sec equals total_synthesis_sec because the serial CLI does not expose partial audio emission",
+    ]
+    return make_benchmark_result(
+        method="serial",
+        total_synthesis_sec=runtime,
+        time_to_first_audio_sec=runtime,
+        output_wav=output_wav,
+        num_characters=len(text),
+        notes=notes,
+    )

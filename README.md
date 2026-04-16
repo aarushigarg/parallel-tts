@@ -32,6 +32,25 @@ kaggle datasets download -d bryanpark/japanese-single-speaker-speech-dataset
 unzip -j japanese-single-speaker-speech-dataset.zip "*/transcript.txt"
 rm japanese-single-speaker-speech-dataset.zip
 ```
+
+### Prepare benchmark prompts and datasets
+The benchmarking setup now includes:
+- curated short / medium / long Japanese prompts in `benchmark_prompts.json`
+- a dataset prep utility that stages the Kaggle JSSS transcript and filtered CC100 Japanese text
+
+Write prepared assets into `datasets/`:
+```bash
+python dataset_setup.py \
+  --kaggle-zip japanese-single-speaker-speech-dataset.zip \
+  --cc100-input path/to/cc100-ja.txt
+```
+
+If you already extracted `transcript.txt`:
+```bash
+python dataset_setup.py \
+  --kaggle-transcript transcript.txt \
+  --cc100-input path/to/cc100-ja.txt
+```
 ## Run
 
 Ensure you are in the venv:
@@ -69,6 +88,16 @@ Use `--all` carefully. The dataset has thousands of rows and model inference can
 If `transcript.txt` is somewhere else:
 ```bash
 python main.py serial --dataset-root path/to/dataset-folder
+```
+
+To benchmark with prepared prompts or CC100 samples instead of `transcript.txt`:
+```bash
+python main.py serial pipeline1 \
+  --input-file datasets/prompts/benchmark_prompts.json
+
+python main.py serial pipeline1 \
+  --input-file datasets/cc100_ja/cc100_ja_eval_samples.csv \
+  -n 3
 ```
 
 To run the pipeline implementation directly on a few transcript rows:
@@ -115,30 +144,38 @@ Outputs are written per method:
 ```text
 outputs/
   buckets.csv
+  run_summary.csv
+  run_summary.json
   serial/
     serial_results.csv
+    serial_summary.json
     short_1.wav
+    short_1_gpu.csv
     medium_2.wav
     long_3.wav
   pipeline/
     pipeline_results.csv
+    pipeline_summary.json
     short_1.wav
     medium_2.wav
     long_3.wav
   pipeline1/
     pipeline1_results.csv
+    pipeline1_summary.json
     short_1.wav
   pipeline2/
     pipeline2_results.csv
+    pipeline2_summary.json
     short_1.wav
 ```
 
 Each method subdirectory is cleared before that method runs. `outputs/buckets.csv` records the exact text inputs used for the run.
+Each per-method CSV now includes total synthesis time, time-to-first-audio, throughput, GPU utilization summaries, and speedup versus serial when the serial baseline is part of the same command. Raw GPU traces are saved as `*_gpu.csv` when `nvidia-smi` is available.
 
 ## How It Works
 
 ### preprocess.py
-The `preprocess.py` script reads `transcript.txt`. Each transcript row is expected to use this format:
+The `preprocess.py` script reads `transcript.txt` by default, but it can also load prompt `.txt`, `.csv`, and `.json` files. Each transcript row is expected to use this format:
 
 ```text
 wav_path|japanese_text|romaji_text|duration
@@ -147,10 +184,13 @@ wav_path|japanese_text|romaji_text|duration
 Only the second field, `japanese_text`, is used as TTS input. The script categorizes phrases into three groups by character length: **short**, **medium**, and **long**. It then selects *n* evenly spaced texts from each category, or all texts when `--all` is used.
 
 ### main.py
-The `main.py` script runs one or more benchmark methods on the selected texts and measures runtime for every input. Results are saved under `outputs/<method>/`.
+The `main.py` script runs one or more benchmark methods on the selected texts and records total synthesis time, time-to-first-audio, output audio duration, throughput, GPU utilization summaries, and speedup versus serial when available. Results are saved under `outputs/<method>/`, with cross-method summaries in `outputs/run_summary.csv` and `outputs/run_summary.json`.
+
+### dataset_setup.py
+The `dataset_setup.py` script prepares final-evaluation assets. It exports curated short/medium/long Japanese prompts, stages the Kaggle JSSS transcript into `datasets/kaggle_jsss/`, and optionally filters a CC100 Japanese text file into `datasets/cc100_ja/cc100_ja_eval_samples.csv`.
 
 ### serial.py
-The `serial.py` script implements the baseline serial pipeline. It takes a single input text, runs the TTS model end-to-end using the Irodori-TTS inference script, and measures the total synthesis time. This serves as the reference point for evaluating performance improvements in later parallel implementations.
+The `serial.py` script implements the baseline serial pipeline. It takes a single input text, runs the TTS model end-to-end using the Irodori-TTS inference script, and measures the total synthesis time. Because the upstream serial CLI does not expose partial audio emission, `time_to_first_audio_sec` is currently recorded as the full synthesis time for this baseline.
 
 ### pipeline.py
 The `pipeline.py` script uses the refactored pipeline runtime. It loads `InferenceRuntime` once for the whole pipeline benchmark run and reuses it across inputs.
