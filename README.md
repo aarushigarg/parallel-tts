@@ -89,7 +89,7 @@ python pipelined_infer.py --text-file transcript.txt --text-file-lines 2 --dry-r
 
 Running pipelined version in Discovery CARC:
 ```bash
-salloc --partition=gpu --constraint=a100 --gres=gpu:1 --cpus-per-task=4 --mem=32GB --time=2:00:00
+salloc --partition=gpu --constraint=v100 --gres=gpu:1 --cpus-per-task=4 --mem=32GB --time=2:00:00
 nvidia-smi
 source .venv/bin/activate
 python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
@@ -99,7 +99,7 @@ Ensure that a GPU is allocated, and cuda is available.
 
 `pipeline2` requires two GPUs:
 ```bash
-salloc --partition=gpu --constraint=a100 --gres=gpu:2 --cpus-per-task=4 --mem=64GB --time=1:00:00
+salloc --partition=gpu --constraint=v100 --gres=gpu:2 --cpus-per-task=4 --mem=64GB --time=1:00:00
 nvidia-smi
 source .venv/bin/activate
 python -c "import torch; print('gpu count:', torch.cuda.device_count()); print('cuda available:', torch.cuda.is_available())"
