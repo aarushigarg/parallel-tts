@@ -7,7 +7,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Empty, Queue
 import sys
-from threading import Thread
+from threading import Lock, Thread
 import time
 from typing import Any
 from pathlib import Path
@@ -1225,6 +1225,7 @@ def synthesize_chunks_parallel(
     output_path = Path(str(args.output_wav))
     suffix = output_path.suffix if output_path.suffix else ".wav"
     pipeline_t0 = time.perf_counter()
+    _decode_lock = Lock()
 
     def _synthesize_segment(index: int, segment: str) -> _DecodeResult:
         segment_seed = None if args.seed is None else int(args.seed) + index - 1
@@ -1257,6 +1258,8 @@ def synthesize_chunks_parallel(
             latent = runtime.unpatchify_sampled_latent(
                 z_patched, prepared, stage_timings=stage_timings, log_fn=_ignore_log
             )
+
+        with _decode_lock, torch.inference_mode():
             audios = runtime.decode_audio(
                 request, context, prepared, latent, stage_timings=stage_timings, log_fn=_ignore_log
             )
