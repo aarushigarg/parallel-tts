@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Empty, Queue
 import sys
 from threading import Thread
@@ -137,6 +138,42 @@ def _concat_audio_segments(
     return torch.cat(parts, dim=-1)
 
 
+def _crossfade_audio_segments(
+    audios,
+    *,
+    sample_rate: int,
+    crossfade_ms: float,
+):
+    import torch
+
+    if not audios:
+        raise ValueError("Expected at least one audio segment to concatenate.")
+    if len(audios) == 1:
+        return audios[0]
+
+    fade_samples = max(1, int(float(sample_rate) * float(crossfade_ms) / 1000.0))
+
+    # Linear fade-out / fade-in ramps of length fade_samples
+    fade_out = torch.linspace(1.0, 0.0, fade_samples, device=audios[0].device, dtype=audios[0].dtype)
+    fade_in = torch.linspace(0.0, 1.0, fade_samples, device=audios[0].device, dtype=audios[0].dtype)
+
+    result = audios[0]
+    for next_audio in audios[1:]:
+        # Trim crossfade region from each side; if a segment is shorter than
+        # the fade length, fall back to zero-padding that segment's overlap.
+        overlap = min(fade_samples, result.shape[-1], next_audio.shape[-1])
+        fo = fade_out[:overlap]
+        fi = fade_in[:overlap]
+
+        tail = result[..., -overlap:] * fo
+        head = next_audio[..., :overlap] * fi
+        blended = tail + head
+
+        result = torch.cat([result[..., :-overlap], blended, next_audio[..., overlap:]], dim=-1)
+
+    return result
+
+
 def _move_optional_tensor(value, device):
     return None if value is None else value.to(device)
 
@@ -257,6 +294,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=80.0,
         help="Silence inserted between synthesized segments in the final wav.",
+    )
+    parser.add_argument(
+        "--chunk-crossfade-ms",
+        type=float,
+        default=0.0,
+        help=(
+            "Crossfade duration in ms applied at chunk boundaries during chunk-parallel synthesis. "
+            "When > 0, a linear fade-out/fade-in overlap replaces the silence buffer. "
+            "Set to 0 to use --segment-silence-ms instead (default: 0)."
+        ),
     )
     parser.add_argument(
         "--save-segments",
@@ -1160,6 +1207,132 @@ def run_from_args(
     if bool(args.pipeline_overlap):
         return synthesize_segmented_text_pipelined(runtime, segments, args)
     return synthesize_segmented_text(runtime, segments, args)
+
+
+def synthesize_chunks_parallel(
+    runtime,
+    segments: list[str],
+    args: argparse.Namespace,
+    *,
+    max_workers: int | None = None,
+) -> SegmentedSynthesisMetrics:
+    import torch
+
+    _, _, SamplingRequest, _, _, save_wav = _load_runtime_api()
+    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker = _resolve_request_cfg_scales(
+        args, runtime
+    )
+    output_path = Path(str(args.output_wav))
+    suffix = output_path.suffix if output_path.suffix else ".wav"
+    pipeline_t0 = time.perf_counter()
+
+    def _synthesize_segment(index: int, segment: str) -> _DecodeResult:
+        segment_seed = None if args.seed is None else int(args.seed) + index - 1
+        request = _build_sampling_request(
+            SamplingRequest,
+            args=args,
+            text=segment,
+            seed=segment_seed,
+            cfg_scale_text=cfg_scale_text,
+            cfg_scale_caption=cfg_scale_caption,
+            cfg_scale_speaker=cfg_scale_speaker,
+        )
+        messages: list[str] = []
+        stage_timings: list[tuple[str, float]] = []
+        stage_start = time.perf_counter()
+
+        def _ignore_log(_msg: str) -> None:
+            return
+
+        with torch.inference_mode():
+            context = runtime._build_sampling_context(
+                request, messages=messages, log_fn=_ignore_log
+            )
+            prepared = runtime.prepare_sampling_inputs(
+                request, context, messages=messages, stage_timings=stage_timings, log_fn=_ignore_log
+            )
+            z_patched = runtime.generate_latent(
+                request, context, prepared, stage_timings=stage_timings, log_fn=_ignore_log
+            )
+            latent = runtime.unpatchify_sampled_latent(
+                z_patched, prepared, stage_timings=stage_timings, log_fn=_ignore_log
+            )
+            audios = runtime.decode_audio(
+                request, context, prepared, latent, stage_timings=stage_timings, log_fn=_ignore_log
+            )
+
+        if not audios:
+            raise RuntimeError(f"Segment {index} produced no decoded audio.")
+        completed_at = time.perf_counter()
+        return _DecodeResult(
+            index=index,
+            audio=audios[0],
+            sample_rate=int(runtime.codec.sample_rate),
+            stage_timings=stage_timings,
+            total_to_decode=completed_at - stage_start,
+            used_seed=int(context.used_seed),
+            completed_at=completed_at,
+        )
+
+    model_device = str(getattr(runtime, "model_device", ""))
+    if model_device.startswith("mps"):
+        # Metal (MPS) does not support concurrent multi-thread GPU access
+        n_workers = 1
+        print("[chunk] MPS device detected: serializing workers (true parallelism requires CUDA)")
+    elif max_workers is None:
+        n_workers = len(segments)
+    else:
+        n_workers = min(len(segments), max_workers)
+    results_by_index: dict[int, _DecodeResult] = {}
+    sample_rate: int | None = None
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_synthesize_segment, idx, seg): idx
+            for idx, seg in enumerate(segments, start=1)
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results_by_index[result.index] = result
+            if sample_rate is None:
+                sample_rate = result.sample_rate
+            print(f"[chunk] segment[{result.index:03d}] used_seed: {result.used_seed}")
+
+    if sample_rate is None:
+        raise RuntimeError("No audio segments were synthesized.")
+
+    ordered_results = [results_by_index[i] for i in range(1, len(segments) + 1)]
+    time_to_first_audio = min(r.completed_at for r in ordered_results) - pipeline_t0
+
+    if bool(args.save_segments):
+        for result in ordered_results:
+            segment_path = output_path.with_name(
+                f"{output_path.stem}_segment_{result.index:03d}{suffix}"
+            )
+            saved = save_wav(segment_path, result.audio, result.sample_rate)
+            print(f"Saved segment[{result.index:03d}]: {saved}")
+
+    crossfade_ms = float(getattr(args, "chunk_crossfade_ms", 0.0))
+    audios = [result.audio for result in ordered_results]
+    if crossfade_ms > 0.0:
+        final_audio = _crossfade_audio_segments(audios, sample_rate=sample_rate, crossfade_ms=crossfade_ms)
+        print(f"[chunk] boundary: crossfade {crossfade_ms:.1f} ms")
+    else:
+        final_audio = _concat_audio_segments(audios, sample_rate=sample_rate, silence_ms=float(args.segment_silence_ms))
+        print(f"[chunk] boundary: silence {args.segment_silence_ms:.1f} ms")
+    out_path = save_wav(args.output_wav, final_audio, sample_rate)
+    print(f"Saved: {out_path}")
+
+    total_time = time.perf_counter() - pipeline_t0
+    print(f"[chunk] time_to_first_audio: {time_to_first_audio:.3f} s")
+    print(f"[chunk] total_synthesis: {total_time:.3f} s")
+    return SegmentedSynthesisMetrics(
+        total_synthesis_sec=total_time,
+        time_to_first_audio_sec=float(time_to_first_audio),
+        sample_rate=sample_rate,
+        stage_timings=_aggregate_stage_timings(ordered_results),
+        segment_count=len(segments),
+    )
 
 
 def main() -> None:
