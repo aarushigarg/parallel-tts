@@ -64,11 +64,12 @@ python main.py serial
 python main.py pipeline
 python main.py pipeline1
 python main.py pipeline2
+python main.py chunk
 ```
 
 Run multiple methods in one command:
 ```bash
-python main.py serial pipeline1 pipeline2
+python main.py serial pipeline1 pipeline2 chunk
 ```
 
 By default, this runs 1 short, 1 medium, and 1 long text from `transcript.txt`.
@@ -115,6 +116,16 @@ To check only the text splitting without loading the model:
 ```bash
 python pipelined_infer.py --text-file transcript.txt --text-file-lines 2 --dry-run-segments
 ```
+
+To run chunk parallelism with crossfade and a worker cap (recommended on a single GPU):
+```bash
+python main.py chunk \
+  --input-file benchmark_prompts.json \
+  --chunk-crossfade-ms 30 \
+  --chunk-max-workers 4
+```
+
+`--chunk-crossfade-ms` sets the crossfade overlap in milliseconds at segment boundaries (default: 0, which uses silence instead). `--chunk-max-workers` caps the number of parallel threads (default: one per segment). Start with 4 on a single GPU to avoid memory pressure.
 
 Running pipelined version in Discovery CARC:
 ```bash
@@ -167,6 +178,12 @@ outputs/
     pipeline2_results.csv
     pipeline2_summary.json
     short_1.wav
+  chunk/
+    chunk_results.csv
+    chunk_summary.json
+    short_1.wav
+    medium_2.wav
+    long_3.wav
 ```
 
 Each method subdirectory is cleared before that method runs. `outputs/buckets.csv` records the exact text inputs used for the run.
@@ -229,6 +246,24 @@ GPU 1:                                      segment 1 sample_rf steps 20-40 + de
 ```
 
 This is more experimental and requires an allocation with at least two CUDA GPUs. It loads two full model runtimes, so it uses more GPU memory than `pipeline1`. Decode stays on `cuda:1` because CPU decode was much slower in testing.
+
+### chunk.py
+The `chunk.py` script implements chunk parallelism. It splits the input text into punctuation-based segments (reusing `text_segments.py`) and submits all segments to a `ThreadPoolExecutor` simultaneously, so multiple segments can be synthesized in parallel rather than one after another.
+
+```text
+thread 1:  segment 1 text -> latent -> audio
+thread 2:  segment 2 text -> latent -> audio
+thread 3:  segment 3 text -> latent -> audio
+...
+```
+
+On a single CUDA GPU, PyTorch serializes kernel launches internally, so segments do not truly run at the same time on the hardware. The benefit is that CPU-side work (tokenization, tensor setup) overlaps across threads and the GPU stays fully utilized. On MPS (Apple Silicon), workers are automatically reduced to 1 since Metal does not support concurrent multi-thread GPU access.
+
+The DACVAE decode step is serialized with a threading lock because the codec is not safe for concurrent calls — concurrent calls can return the raw 32-dim latent instead of the decoded 1-channel waveform.
+
+After all segments finish, the audio chunks are concatenated in original text order. Boundaries can be joined with either a silence gap (`--segment-silence-ms`, default 80 ms) or a linear crossfade (`--chunk-crossfade-ms`), which fades out the tail of one segment while fading in the head of the next to reduce audible clicks.
+
+`time_to_first_audio` is recorded as the wall-clock time from synthesis start until the earliest segment completes.
 
 ### text_segments.py
 The `text_segments.py` script contains shared punctuation-based Japanese text segmentation. Both pipeline and chunk-parallel implementations should use this file so the benchmark compares scheduling strategy rather than different text boundaries.

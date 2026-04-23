@@ -12,6 +12,7 @@ from benchmarking import (
     write_csv_rows,
     write_json,
 )
+from chunk import ChunkParallelTTSRunner
 from pipeline import PipelineTTSRunner, RFSplitPipelineTTSRunner
 from preprocess import get_length_buckets, save_buckets_to_csv
 from serial import run_serial_tts
@@ -24,7 +25,7 @@ def parse_args():
     parser.add_argument(
         "methods",
         nargs="+",
-        choices=["serial", "pipeline", "pipeline1", "pipeline2"],
+        choices=["serial", "pipeline", "pipeline1", "pipeline2", "chunk"],
         help="Inference runner(s) to use.",
     )
     parser.add_argument(
@@ -55,6 +56,18 @@ def parse_args():
         default=0.25,
         help="Polling interval in seconds for nvidia-smi GPU utilization logging.",
     )
+    parser.add_argument(
+        "--chunk-crossfade-ms",
+        type=float,
+        default=0.0,
+        help="Crossfade duration in ms at chunk boundaries (chunk method only). 0 uses silence instead.",
+    )
+    parser.add_argument(
+        "--chunk-max-workers",
+        type=int,
+        default=None,
+        help="Max parallel worker threads for chunk method. Defaults to one thread per segment. Start with 2-4 on CUDA to limit GPU memory pressure.",
+    )
     return parser.parse_args()
 
 
@@ -67,13 +80,15 @@ def clear_output_dir(path):
             shutil.rmtree(item)
 
 
-def create_runner(method):
+def create_runner(method, *, chunk_crossfade_ms=0.0, chunk_max_workers=None):
     if method == "serial":
         return run_serial_tts
     if method in {"pipeline", "pipeline1"}:
         return PipelineTTSRunner().run
     if method == "pipeline2":
         return RFSplitPipelineTTSRunner().run
+    if method == "chunk":
+        return ChunkParallelTTSRunner(crossfade_ms=chunk_crossfade_ms, max_workers=chunk_max_workers).run
     raise ValueError(f"Unsupported method: {method}")
 
 
@@ -97,14 +112,14 @@ def _print_sample_summary(index, method, length_label, result, speedup_vs_serial
         print(f"[{index}] gpu_monitor_error: {result.gpu_stats.monitor_error}")
 
 
-def run_method(method, categorized_texts, *, gpu_poll_interval, serial_baselines):
+def run_method(method, categorized_texts, *, gpu_poll_interval, serial_baselines, chunk_crossfade_ms=0.0, chunk_max_workers=None):
     method_output_dir = OUTPUT_DIR / method
     clear_output_dir(method_output_dir)
     csv_file = method_output_dir / f"{method}_results.csv"
     summary_file = method_output_dir / f"{method}_summary.json"
     results = []
     sample_index = 1
-    run_tts = create_runner(method)
+    run_tts = create_runner(method, chunk_crossfade_ms=chunk_crossfade_ms, chunk_max_workers=chunk_max_workers)
 
     program_start = datetime.now()
     program_start_str = program_start.strftime("%Y-%m-%d %H:%M:%S")
@@ -305,6 +320,8 @@ def main():
             categorized_texts,
             gpu_poll_interval=float(args.gpu_poll_interval),
             serial_baselines=serial_baselines,
+            chunk_crossfade_ms=float(args.chunk_crossfade_ms),
+            chunk_max_workers=args.chunk_max_workers,
         )
         all_results.extend(method_rows)
 
